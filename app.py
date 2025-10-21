@@ -1,5 +1,5 @@
 import os, asyncio, time
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, Body
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import aiosqlite, httpx
@@ -12,6 +12,10 @@ CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 SHARED     = os.getenv("SHARED_SECRET", "")
 THRESHOLD  = int(os.getenv("DOWN_THRESHOLD_SEC", "180"))  # сек. до статуса DOWN
 SITE_TITLE = os.getenv("SITE_TITLE", "Gensyn Nodes")
+
+# Админ-опции
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")                 # Bearer токен админа
+PRUNE_DAYS  = int(os.getenv("PRUNE_DAYS", "0"))            # 0 = не чистить
 
 if not (BOT_TOKEN and CHAT_ID and SHARED):
     raise RuntimeError("Set TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SHARED_SECRET in .env")
@@ -117,7 +121,15 @@ def auth_ok(h: str | None) -> bool:
     p = h.split()
     return len(p) == 2 and p[0].lower() == "bearer" and p[1] == SHARED
 
-# ── API ───────────────────────────────────────────────────────────────────────
+def admin_ok(h: str | None) -> bool:
+    if not ADMIN_TOKEN:
+        return False
+    if not h:
+        return False
+    p = h.split()
+    return len(p) == 2 and p[0].lower() == "bearer" and p[1] == ADMIN_TOKEN
+
+# ── Публичное API ─────────────────────────────────────────────────────────────
 @app.post("/api/heartbeat")
 async def heartbeat(req: Request, authorization: str | None = Header(default=None)):
     if not auth_ok(authorization):
@@ -141,3 +153,62 @@ async def index(request: Request):
         "index.html",
         {"request": request, "site_title": SITE_TITLE, "threshold": THRESHOLD}
     )
+
+# ── Админ-API ─────────────────────────────────────────────────────────────────
+@app.post("/api/admin/rename")
+async def admin_rename(
+    authorization: str | None = Header(default=None),
+    old_id: str = Body(...),
+    new_id: str = Body(...)
+):
+    if not admin_ok(authorization):
+        raise HTTPException(401, "Unauthorized")
+    old_id = (old_id or "").strip()
+    new_id = (new_id or "").strip()
+    if not old_id or not new_id:
+        raise HTTPException(400, "old_id/new_id required")
+    if old_id == new_id:
+        return {"ok": True, "renamed": False}
+
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT 1 FROM nodes WHERE node_id=?", (new_id,))
+        exists = await cur.fetchone()
+        if exists:
+            raise HTTPException(409, "new_id already exists")
+        await db.execute("UPDATE nodes SET node_id=? WHERE node_id=?", (new_id, old_id))
+        await db.commit()
+    return {"ok": True, "renamed": True, "old_id": old_id, "new_id": new_id}
+
+@app.post("/api/admin/delete")
+async def admin_delete(
+    authorization: str | None = Header(default=None),
+    node_id: str = Body(..., embed=True)
+):
+    if not admin_ok(authorization):
+        raise HTTPException(401, "Unauthorized")
+    node_id = (node_id or "").strip()
+    if not node_id:
+        raise HTTPException(400, "node_id required")
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+        await db.commit()
+    return {"ok": True, "deleted": node_id}
+
+@app.post("/api/admin/prune")
+async def admin_prune(
+    authorization: str | None = Header(default=None),
+    days: int | None = Body(default=None)
+):
+    if not admin_ok(authorization):
+        raise HTTPException(401, "Unauthorized")
+    cutoff_days = days if (days is not None) else PRUNE_DAYS
+    if not cutoff_days or cutoff_days <= 0:
+        return {"ok": True, "deleted": 0, "skipped": True}
+
+    cutoff_ts = int(time.time()) - cutoff_days * 86400
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM nodes WHERE last_seen < ?", (cutoff_ts,))
+        (cnt_before,) = await cur.fetchone()
+        await db.execute("DELETE FROM nodes WHERE last_seen < ?", (cutoff_ts,))
+        await db.commit()
+    return {"ok": True, "deleted": int(cnt_before), "cutoff_days": cutoff_days}
