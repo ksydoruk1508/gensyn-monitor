@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>{{ site_title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; margin: 24px; }
+    h1 { margin: 0 0 12px; }
+    .muted { color: #666; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: middle; }
+    th { font-weight: 600; }
+    code { background: rgba(127,127,127,.12); padding: 2px 6px; border-radius: 6px; }
+    .UP { color: #1a7f37; font-weight: 700; }
+    .DOWN { color: #b00020; font-weight: 700; }
+    .pill { border: 1px solid #ccc; padding: 2px 6px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+    .toolbar { display: flex; gap: 8px; margin: 10px 0 18px; align-items: center; }
+    .badge { font-size: 12px; border: 1px solid #ccc; border-radius: 999px; padding: 2px 8px; }
+    button { padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background: transparent; cursor: pointer; }
+    button:active { transform: translateY(1px); }
+    tfoot td { padding-top: 12px; font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>{{ site_title }}</h1>
+  <div class="toolbar">
+    <span class="badge">Порог неактивности: {{ threshold }}s</span>
+    <button id="refreshBtn">Обновить</button>
+    <span class="muted" id="updatedAt"></span>
+  </div>
+
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th>Node ID</th>
+        <th>IP</th>
+        <th>Статус</th>
+        <th>Последний heartbeat</th>
+        <th>Возраст, сек</th>
+        <th>Meta</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+    <tfoot><tr><td colspan="6" class="muted">Автообновление каждые 10 секунд</td></tr></tfoot>
+  </table>
+
+<script>
+const fmtTs = (ts) => new Date(ts * 1000).toLocaleString();
+const tbody = document.querySelector('#tbl tbody');
+const updatedAtEl = document.getElementById('updatedAt');
+
+async function load() {
+  try {
+    const res = await fetch('/api/nodes', { cache: 'no-store' });
+    const data = await res.json();
+
+    // сортировка: DOWN сверху
+    data.sort((a,b) => (a.computed === 'DOWN') === (b.computed === 'DOWN') ? a.node_id.localeCompare(b.node_id) : (a.computed === 'DOWN' ? -1 : 1));
+
+    tbody.innerHTML = '';
+    for (const n of data) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><code>${n.node_id}</code></td>
+        <td><code>${n.ip || ''}</code></td>
+        <td class="${n.computed}">${n.computed}</td>
+        <td class="muted">${fmtTs(n.last_seen)}</td>
+        <td>${n.age_sec}</td>
+        <td><span class="pill" title="${(n.meta||'').toString()}">${(n.meta||'').toString().slice(0,80)}</span></td>
+      `;
+      tbody.appendChild(tr);
+    }
+    updatedAtEl.textContent = 'Обновлено: ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    updatedAtEl.textContent = 'Ошибка загрузки...';
+  }
+}
+
+document.getElementById('refreshBtn').addEventListener('click', load);
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

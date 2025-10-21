@@ -1,0 +1,22 @@
+[Unit]
+Description=Gensyn heartbeat agent (Linux)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Можно вынести переменные в /etc/gensyn-agent.env (подхватит скрипт)
+Environment=SERVER_URL=http://YOUR_MONITOR_HOST:8080
+Environment=SHARED_SECRET=super-long-random-secret
+Environment=NODE_ID=my-gensyn-01
+Environment=META=hetzner-fsn1
+# Не меняй путь, если ставил по инструкции:
+ExecStart=/usr/local/bin/gensyn_agent.sh
+# Логи в системный журнал:
+StandardOutput=journal
+StandardError=journal
+# На случай отсутствия сети при старте:
+ExecStartPre=/usr/bin/bash -lc 'ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || true'
+
+[Install]
+WantedBy=multi-user.target
