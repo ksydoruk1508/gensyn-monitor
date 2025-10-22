@@ -154,15 +154,26 @@ async def send_tg(text: str):
             data={"chat_id": CHAT_ID, "parse_mode": "Markdown", "text": text}
         )
 
-async def upsert(node_id: str, ip: str, meta: str | None):
+async def upsert(node_id: str, ip: str, meta: str | None, status: str):
     now = int(time.time())
+    status = (status or "UP").upper()
     async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT INTO nodes(node_id,ip,last_seen,last_state,last_computed,meta)
-            VALUES(?, ?, ?, 'DOWN','UP', ?)
-            ON CONFLICT(node_id) DO UPDATE
-              SET ip=excluded.ip, last_seen=excluded.last_seen, meta=excluded.meta
-        """, (node_id, ip, now, meta))
+        if status == "UP":
+            # обычный апдейт — двигаем last_seen
+            await db.execute("""
+                INSERT INTO nodes(node_id,ip,last_seen,last_state,last_computed,meta)
+                VALUES(?, ?, ?, 'DOWN','UP', ?)
+                ON CONFLICT(node_id) DO UPDATE
+                  SET ip=excluded.ip, last_seen=excluded.last_seen, meta=excluded.meta
+            """, (node_id, ip, now, meta))
+        else:
+            # DOWN: last_seen не трогаем, но мету обновим
+            await db.execute("""
+                INSERT INTO nodes(node_id,ip,last_seen,last_state,last_computed,meta)
+                VALUES(?, ?, ?, 'DOWN','DOWN', ?)
+                ON CONFLICT(node_id) DO UPDATE
+                  SET ip=excluded.ip, meta=excluded.meta
+            """, (node_id, ip, now, meta))
         await db.commit()
 
 async def list_nodes():
@@ -237,9 +248,10 @@ async def heartbeat(req: Request, authorization: str | None = Header(default=Non
     node_id = str(data.get("node_id", "")).strip()
     if not node_id:
         raise HTTPException(400, "node_id required")
-    ip = str(data.get("ip", "")).strip()
-    meta = str(data.get("meta", "")) if data.get("meta") else None
-    await upsert(node_id, ip, meta)
+    ip     = str(data.get("ip", "")).strip()
+    meta   = str(data.get("meta", "")) if data.get("meta") else None
+    status = str(data.get("status", "UP")).upper()
+    await upsert(node_id, ip, meta, status)
     return {"ok": True}
 
 @app.get("/api/nodes")
@@ -311,3 +323,4 @@ async def admin_prune(
         await db.execute("DELETE FROM nodes WHERE last_seen < ?", (cutoff_ts,))
         await db.commit()
     return {"ok": True, "deleted": int(cnt_before), "cutoff_days": cutoff_days}
+
