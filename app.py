@@ -8,15 +8,11 @@ from fastapi.templating import Jinja2Templates
 import aiosqlite, httpx
 from dotenv import load_dotenv
 
-# ── Работа с .env (обязательный Telegram + SHARED) ────────────────────────────
+# ── Обязательная инициализация .env с вопросами ───────────────────────────────
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env"
 
-def _env(name: str, default: Optional[str] = None) -> Optional[str]:
-    val = os.getenv(name)
-    return val if (val is not None and val != "") else default
-
-def _upsert_env_file(**pairs: str) -> None:
+def _write_env_file(pairs: dict):
     lines = []
     if ENV_PATH.exists():
         lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
@@ -32,99 +28,83 @@ def _upsert_env_file(**pairs: str) -> None:
             lines.append(set_line)
 
     for k, v in pairs.items():
-        if v is not None:
-            upsert(k, v)
-    if "DOWN_THRESHOLD_SEC" not in "\n".join(lines):
-        lines.append("DOWN_THRESHOLD_SEC=180")  # дефолт как и раньше
+        upsert(k, v)
+
+    # дефолты, если их нет
+    if not any(l.startswith("DOWN_THRESHOLD_SEC=") for l in lines):
+        lines.append("DOWN_THRESHOLD_SEC=180")
+    if not any(l.startswith("SITE_TITLE=") for l in lines):
+        lines.append("SITE_TITLE=Gensyn Nodes")
 
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-def _prompt_if_tty(prompt: str, default: Optional[str] = None) -> Optional[str]:
-    try:
-        if sys.stdin.isatty():
-            x = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
-            return x or default
-    except Exception:
-        pass
-    return default
-
-def ensure_required_env(require_telegram: bool = True) -> None:
+def _ask_required_env():
     """
-    Если поднимаем вручную (TTY) и чего-то нет — зададим вопросы и запишем в .env.
-    Если под systemd/не TTY — бросим понятную ошибку с шаблоном .env.
+    Обязательный опрос недостающих переменных.
+    Если stdin не интерактивный, input() вызовет EOFError — это ок: упадём с понятной ошибкой.
     """
-    # загрузим текущее .env
+    # сначала загрузим то, что уже есть
     load_dotenv(dotenv_path=ENV_PATH)
 
-    shared = _env("SHARED_SECRET")
-    bot    = _env("TELEGRAM_BOT_TOKEN")
-    chat   = _env("TELEGRAM_CHAT_ID")
+    need = {}
+    SHARED     = os.getenv("SHARED_SECRET", "").strip()
+    BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-    missing = []
-    if not shared:
-        missing.append("SHARED_SECRET")
-    if require_telegram and not bot:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if require_telegram and not chat:
-        missing.append("TELEGRAM_CHAT_ID")
-
-    if not missing:
-        return  # все ок
-
-    if sys.stdin.isatty():
-        print("\nНе хватает настроек. Заполним сейчас и сохраним в .env\n")
-        if not shared:
-            shared = _prompt_if_tty("Введите SHARED_SECRET (общий секрет для агентов)")
-        if require_telegram and not bot:
-            bot = _prompt_if_tty("Введите TELEGRAM_BOT_TOKEN (токен бота)")
-        if require_telegram and not chat:
-            chat = _prompt_if_tty("Введите TELEGRAM_CHAT_ID (ID чата/пользователя)")
-
-        still_missing = []
-        if not shared: still_missing.append("SHARED_SECRET")
-        if require_telegram and not bot:  still_missing.append("TELEGRAM_BOT_TOKEN")
-        if require_telegram and not chat: still_missing.append("TELEGRAM_CHAT_ID")
-        if still_missing:
+    if not SHARED:
+        try:
+            SHARED = input("Введите SHARED_SECRET (общий секрет для агентов): ").strip()
+        except Exception:
             raise RuntimeError(
-                "Не заданы обязательные переменные: "
-                + ", ".join(still_missing)
-                + f"\nДобавьте их в {ENV_PATH}:\n\n"
-                  "SHARED_SECRET=...\n"
-                  "TELEGRAM_BOT_TOKEN=...\n"
-                  "TELEGRAM_CHAT_ID=...\n"
-                  "DOWN_THRESHOLD_SEC=180\n"
-                  "# ADMIN_TOKEN=...\n"
+                f"Нужен SHARED_SECRET, но не удалось спросить интерактивно.\n"
+                f"Добавь в {ENV_PATH} строки:\n"
+                f"SHARED_SECRET=...\nTELEGRAM_BOT_TOKEN=...\nTELEGRAM_CHAT_ID=...\n"
+                f"и перезапусти сервис."
+            )
+    if not BOT_TOKEN:
+        try:
+            BOT_TOKEN = input("Введите TELEGRAM_BOT_TOKEN (токен бота): ").strip()
+        except Exception:
+            raise RuntimeError(
+                f"Нужен TELEGRAM_BOT_TOKEN, но не удалось спросить интерактивно.\n"
+                f"Добавь в {ENV_PATH} и перезапусти."
+            )
+    if not CHAT_ID:
+        try:
+            CHAT_ID = input("Введите TELEGRAM_CHAT_ID (ID чата/пользователя/канала): ").strip()
+        except Exception:
+            raise RuntimeError(
+                f"Нужен TELEGRAM_CHAT_ID, но не удалось спросить интерактивно.\n"
+                f"Добавь в {ENV_PATH} и перезапусти."
             )
 
-        # Сохраняем и подхватываем в процесс
-        _upsert_env_file(SHARED_SECRET=shared, TELEGRAM_BOT_TOKEN=bot or "", TELEGRAM_CHAT_ID=chat or "")
-        os.environ["SHARED_SECRET"] = shared or ""
-        os.environ["TELEGRAM_BOT_TOKEN"] = bot or ""
-        os.environ["TELEGRAM_CHAT_ID"] = chat or ""
-        return
+    # минимальная валидация
+    if not SHARED or not BOT_TOKEN or not CHAT_ID:
+        raise RuntimeError(
+            "Все переменные обязательны. Пример .env:\n"
+            "SHARED_SECRET=... (любой длинный секрет)\n"
+            "TELEGRAM_BOT_TOKEN=123456:ABCDEF...\n"
+            "TELEGRAM_CHAT_ID=123456789\n"
+            "DOWN_THRESHOLD_SEC=180\n"
+            "# ADMIN_TOKEN=по_желанию\n"
+        )
 
-    # не TTY — под systemd
-    sample = (
-        "Пример .env:\n"
-        "SHARED_SECRET=замени_на_секрет\n"
-        "TELEGRAM_BOT_TOKEN=123456:ABCDEF...\n"
-        "TELEGRAM_CHAT_ID=123456789\n"
-        "DOWN_THRESHOLD_SEC=180\n"
-        "# ADMIN_TOKEN=по_желанию\n"
-    )
-    raise RuntimeError(
-        "Отсутствуют обязательные переменные окружения: "
-        + ", ".join(missing)
-        + f"\nЗадайте их в {ENV_PATH} или через EnvironmentFile в systemd.\n\n"
-        + sample
-    )
+    # сохраним в .env (создаст или обновит) и в процесс
+    _write_env_file({
+        "SHARED_SECRET": SHARED,
+        "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
+        "TELEGRAM_CHAT_ID": CHAT_ID,
+    })
+    os.environ["SHARED_SECRET"] = SHARED
+    os.environ["TELEGRAM_BOT_TOKEN"] = BOT_TOKEN
+    os.environ["TELEGRAM_CHAT_ID"] = CHAT_ID
 
-# ВЫЗЫВАЕМ ДО СОЗДАНИЯ ПРИЛОЖЕНИЯ
-ensure_required_env(require_telegram=True)
+# вызываем опрос до загрузки конфигурации
+_ask_required_env()
+# и ещё раз подхватим .env (на случай первой инициализации)
+load_dotenv(dotenv_path=ENV_PATH)
 
 # ── Конфиг ─────────────────────────────────────────────────────────────────────
-# (после ensure_required_env значения уже гарантированно есть)
-load_dotenv(dotenv_path=ENV_PATH)  # на случай, если только что записали
 BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 SHARED     = os.getenv("SHARED_SECRET", "")
@@ -134,6 +114,10 @@ SITE_TITLE = os.getenv("SITE_TITLE", "Gensyn Nodes")
 # Админ-опции
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")                 # Bearer токен админа
 PRUNE_DAYS  = int(os.getenv("PRUNE_DAYS", "0"))            # 0 = не чистить
+
+# дополнительная гарантия
+if not (BOT_TOKEN and CHAT_ID and SHARED):
+    raise RuntimeError("Нужно задать TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID и SHARED_SECRET в .env")
 
 DB = "monitor.db"
 
