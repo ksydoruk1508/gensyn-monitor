@@ -1,3 +1,4 @@
+from typing import Optional
 import os, asyncio, time
 from fastapi import FastAPI, Request, HTTPException, Header, Body
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -38,6 +39,11 @@ async def init_db():
                 meta TEXT
             )
         """)
+        # миграция: добавить last_reported, если его нет
+        try:
+            await db.execute("ALTER TABLE nodes ADD COLUMN last_reported TEXT DEFAULT 'UP'")
+        except Exception:
+            pass  # колонка уже существует
         await db.commit()
 
 @app.on_event("startup")
@@ -45,8 +51,8 @@ async def startup():
     await init_db()
     asyncio.create_task(watchdog_loop())
 
-def computed_state(last_seen: int) -> str:
-    return "UP" if (int(time.time()) - int(last_seen)) <= THRESHOLD else "DOWN"
+def fresh_since(last_seen: int) -> bool:
+    return (int(time.time()) - int(last_seen)) <= THRESHOLD
 
 async def send_tg(text: str):
     async with httpx.AsyncClient(timeout=10) as c:
@@ -55,15 +61,21 @@ async def send_tg(text: str):
             data={"chat_id": CHAT_ID, "parse_mode": "Markdown", "text": text}
         )
 
-async def upsert(node_id: str, ip: str, meta: str | None):
+async def upsert(node_id: str, ip: str, meta: Optional[str], reported: str):
+    """
+    reported — статус, присланный агентом: 'UP' | 'DOWN' (валидируем в handler’е).
+    """
     now = int(time.time())
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
-            INSERT INTO nodes(node_id,ip,last_seen,last_state,last_computed,meta)
-            VALUES(?, ?, ?, 'DOWN','UP', ?)
+            INSERT INTO nodes(node_id,ip,last_seen,last_state,last_computed,meta,last_reported)
+            VALUES(?, ?, ?, 'DOWN','UP', ?, ?)
             ON CONFLICT(node_id) DO UPDATE
-              SET ip=excluded.ip, last_seen=excluded.last_seen, meta=excluded.meta
-        """, (node_id, ip, now, meta))
+              SET ip=excluded.ip,
+                  last_seen=excluded.last_seen,
+                  meta=excluded.meta,
+                  last_reported=excluded.last_reported
+        """, (node_id, ip, now, meta, reported))
         await db.commit()
 
 async def list_nodes():
@@ -73,15 +85,18 @@ async def list_nodes():
         now = int(time.time())
         out = []
         for r in rows:
-            st = computed_state(r["last_seen"])
+            is_fresh = fresh_since(r["last_seen"])
+            reported = (r["last_reported"] or "DOWN").upper() if "last_reported" in r.keys() else "UP"
+            computed = "UP" if (is_fresh and reported == "UP") else "DOWN"
             out.append({
                 "node_id": r["node_id"],
                 "ip": r["ip"],
                 "last_seen": r["last_seen"],
-                "computed": st,
+                "computed": computed,
                 "last_state": r["last_state"],
                 "meta": r["meta"],
-                "age_sec": max(0, now - int(r["last_seen"]))
+                "age_sec": max(0, now - int(r["last_seen"])),
+                "reported": reported
             })
         return out
 
@@ -115,13 +130,13 @@ async def watchdog_loop():
             pass
         await asyncio.sleep(60)
 
-def auth_ok(h: str | None) -> bool:
+def auth_ok(h: Optional[str]) -> bool:
     if not h:
         return False
     p = h.split()
     return len(p) == 2 and p[0].lower() == "bearer" and p[1] == SHARED
 
-def admin_ok(h: str | None) -> bool:
+def admin_ok(h: Optional[str]) -> bool:
     if not ADMIN_TOKEN:
         return False
     if not h:
@@ -131,7 +146,7 @@ def admin_ok(h: str | None) -> bool:
 
 # ── Публичное API ─────────────────────────────────────────────────────────────
 @app.post("/api/heartbeat")
-async def heartbeat(req: Request, authorization: str | None = Header(default=None)):
+async def heartbeat(req: Request, authorization: Optional[str] = Header(default=None)):
     if not auth_ok(authorization):
         raise HTTPException(401, "Unauthorized")
     data = await req.json()
@@ -140,7 +155,10 @@ async def heartbeat(req: Request, authorization: str | None = Header(default=Non
         raise HTTPException(400, "node_id required")
     ip = str(data.get("ip", "")).strip()
     meta = str(data.get("meta", "")) if data.get("meta") else None
-    await upsert(node_id, ip, meta)
+    reported = str(data.get("status", "UP")).strip().upper()
+    if reported not in ("UP", "DOWN"):
+        reported = "DOWN"
+    await upsert(node_id, ip, meta, reported)
     return {"ok": True}
 
 @app.get("/api/nodes")
@@ -157,7 +175,7 @@ async def index(request: Request):
 # ── Админ-API ─────────────────────────────────────────────────────────────────
 @app.post("/api/admin/rename")
 async def admin_rename(
-    authorization: str | None = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
     old_id: str = Body(...),
     new_id: str = Body(...)
 ):
@@ -181,7 +199,7 @@ async def admin_rename(
 
 @app.post("/api/admin/delete")
 async def admin_delete(
-    authorization: str | None = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
     node_id: str = Body(..., embed=True)
 ):
     if not admin_ok(authorization):
@@ -196,8 +214,8 @@ async def admin_delete(
 
 @app.post("/api/admin/prune")
 async def admin_prune(
-    authorization: str | None = Header(default=None),
-    days: int | None = Body(default=None)
+    authorization: Optional[str] = Header(default=None),
+    days: Optional[int] = Body(default=None)
 ):
     if not admin_ok(authorization):
         raise HTTPException(401, "Unauthorized")
