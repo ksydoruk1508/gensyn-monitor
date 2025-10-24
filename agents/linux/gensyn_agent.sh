@@ -37,7 +37,9 @@ log() { printf '[%s] %s\n' "$(date -u +%F'T'%T'Z')" "$*" >&2; }
 # Имя screen-сессии вида "12345.gensyn"
 screen_session_name() {
   have screen || return 1
-  screen -list 2>/dev/null | awk -v name="$SCREEN_NAME" '$0 ~ "[0-9]+\\."name"\\b" {print $1; exit }'
+  screen -list 2>/dev/null \
+    | sed -nE "s/^[[:space:]]*([0-9]+\.${SCREEN_NAME})[[:space:]].*/\1/p" \
+    | head -n1
 }
 
 # Есть ли В ЭТОЙ screen «боевой» процесс (по ALLOW), не попадающий под DENY?
