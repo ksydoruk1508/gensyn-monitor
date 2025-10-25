@@ -18,13 +18,14 @@ IP_CMD="${IP_CMD:-https://ifconfig.me}"
 AUTO_KILL_EMPTY_SCREEN="${AUTO_KILL_EMPTY_SCREEN:-false}"
 
 # Runtime “allow/deny”
+# ⚠️ NOTE: default uses double quotes here; in /etc/gensyn-agent.env prefer SINGLE quotes for regex values.
 ALLOW_REGEX="${ALLOW_REGEX:-rgym_exp\.runner\.swarm_launcher|hivemind_cli/p2pd|(^|[/[:space:]])rl-swarm([[:space:]]|$)|python[^ ]*.*rgym_exp}"
 DENY_REGEX="${DENY_REGEX:-run_rl_swarm\.sh|while[[:space:]]+true|sleep[[:space:]]+60}"
 
 # Consider UP if target process exists outside screen
 PROC_FALLBACK_WITHOUT_SCREEN="${PROC_FALLBACK_WITHOUT_SCREEN:-true}"
 
-# Variant A: require p2pd presence
+# p2pd requirement: false | any | screen
 REQUIRE_P2PD="${REQUIRE_P2PD:-false}"
 
 # Variant B: require fresh log
@@ -39,7 +40,7 @@ fi
 
 # --- Helpers -------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
-log() { printf '[%s] %s\n' "$(date -u +%F'T'%T'Z')" "$*" >&2; }
+log()  { printf '[%s] %s\n' "$(date -u +%F'T'%T'Z')" "$*" >&2; }
 
 # screen name like "12345.gensyn"
 screen_session_name() {
@@ -66,22 +67,26 @@ has_target_in_screen() {
   return 1
 }
 
-# Is p2pd running inside THIS screen?
-p2pd_ok_in_screen() {
-  local sname="$1"
-  [[ -z "$sname" ]] && return 1
-  have pgrep || return 1
-  for pid in $(pgrep -f 'hivemind_cli/p2pd' 2>/dev/null || true); do
-    if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "STY=$sname"; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Is p2pd running anywhere (used when there's no screen fallback)?
-p2pd_ok_global() {
-  have pgrep && pgrep -f 'hivemind_cli/p2pd' >/dev/null 2>&1
+# Require p2pd: false (no requirement) | any (anywhere) | screen (inside this screen)
+p2pd_ok() {
+  local mode="${REQUIRE_P2PD}"
+  case "$mode" in
+    false) return 0 ;;
+    any)
+      pgrep -f 'hivemind_cli/p2pd' >/dev/null 2>&1
+      return $?
+      ;;
+    screen)
+      local sname="$1"
+      [[ -n "$sname" ]] || return 1
+      have pgrep || return 1
+      while IFS= read -r p; do
+        tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "STY=$sname" && return 0
+      done < <(pgrep -f 'hivemind_cli/p2pd' 2>/dev/null || true)
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
 }
 
 # If no screen allowed: any ALLOW process?
@@ -123,23 +128,18 @@ reason=""
 sname="$(screen_session_name || true)"
 
 if [[ -n "$sname" ]]; then
-  # must have target process in screen
   if ! has_target_in_screen "$sname"; then
     reason="empty_screen_no_runtime"
-  # optionally require p2pd in SAME screen
-  elif [[ "${REQUIRE_P2PD}" == "true" ]] && ! p2pd_ok_in_screen "$sname"; then
-    reason="p2pd_missing_in_screen"
-  # port must be OK if enabled
+  elif ! p2pd_ok "$sname"; then
+    reason="no_p2pd_in_screen"
   elif ! port_ok; then
     reason="port_closed_${PORT}"
-  # log must be fresh if configured
   elif ! log_fresh; then
     reason="stale_log"
   else
     status="UP"
   fi
 
-  # Optional autoclose empty screen
   if [[ "$status" == "DOWN" && "$reason" == "empty_screen_no_runtime" && "$AUTO_KILL_EMPTY_SCREEN" == "true" ]]; then
     screen -S "$SCREEN_NAME" -X quit || true
     log "INFO: auto-closed empty screen $SCREEN_NAME"
@@ -147,8 +147,8 @@ if [[ -n "$sname" ]]; then
 else
   # No screen found — allow fallback if enabled
   if proc_ok; then
-    if [[ "${REQUIRE_P2PD}" == "true" ]] && ! p2pd_ok_global; then
-      reason="p2pd_missing"
+    if ! p2pd_ok ""; then
+      reason="no_p2pd"
     elif ! port_ok; then
       reason="port_closed_${PORT}"
     elif ! log_fresh; then
@@ -163,8 +163,12 @@ fi
 
 IP="$(public_ip)"
 
+# put reason into meta when DOWN (to see it in /api/nodes & UI)
+META_OUT="${META}"
+[[ -n "$reason" && "$status" != "UP" ]] && META_OUT="${META:+$META,}reason=${reason}"
+
 payload=$(printf '{"node_id":"%s","ip":"%s","meta":"%s","status":"%s"}' \
-  "$NODE_ID" "${IP}" "${META}" "${status}")
+  "$NODE_ID" "${IP}" "${META_OUT}" "${status}")
 
 # --- Send heartbeat ------------------------------------------------------------
 if ! have curl; then
