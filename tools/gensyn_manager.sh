@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 REPO_URL="https://github.com/k2wGG/gensyn-monitor.git"
 REPO_DIR="/opt/gensyn-monitor"
+RAW_BASE="https://raw.githubusercontent.com/k2wGG/gensyn-monitor/main"
 
 SERVICE_NAME="gensyn-monitor"
 
@@ -52,7 +53,8 @@ ask() {
 
 ensure_dos2unix() {
   if ! have_cmd dos2unix; then
-    apt-get update && apt-get install -y dos2unix >/dev/null
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y dos2unix >/dev/null 2>&1 || true
   fi
 }
 
@@ -78,7 +80,7 @@ prepare_device() {
   need_root
   echo "[*] Обновляем пакеты и ставим зависимости…"
   apt-get update
-  apt-get install -y python3 python3-venv python3-pip git sqlite3 curl jq unzip
+  apt-get install -y python3 python3-venv python3-pip git sqlite3 curl jq unzip ca-certificates
   echo "[+] Готово"
 }
 
@@ -93,6 +95,28 @@ clone_or_update_repo() {
     mkdir -p "$(dirname "$dest")"
     git clone "$REPO_URL" "$dest"
   fi
+}
+
+ensure_repo_for_agent() {
+  # Гарантирует наличие репозитория для установки агента.
+  # Если локально нет, пытается клонировать REPO_DIR.
+  # Возвращает echo путь к каталогу с agents/linux или пустую строку при неудаче.
+  local local_agents="$REPO_ROOT/agents/linux"
+  if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
+    echo "$local_agents"
+    return 0
+  fi
+  if have_cmd git; then
+    echo "[*] Локальный репозиторий не найден. Клонирую в $REPO_DIR…"
+    clone_or_update_repo "$REPO_DIR"
+    local_agents="$REPO_DIR/agents/linux"
+    if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
+      echo "$local_agents"
+      return 0
+    fi
+  fi
+  echo ""
+  return 1
 }
 
 install_monitor() {
@@ -129,7 +153,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=${repo}
 Environment=PYTHONUNBUFFERED=1
-# Вдобавок к python-dotenv, пробрасываем .env и в окружение процесса (добровольно)
+# Пробрасываем .env в окружение процесса (в дополнение к python-dotenv)
 EnvironmentFile=-${repo}/.env
 ExecStart=${repo}/.venv/bin/uvicorn app:app --host 0.0.0.0 --port ${port}
 Restart=always
@@ -162,6 +186,17 @@ update_monitor() {
   echo "[+] Монитор обновлён и перезапущен."
 }
 
+install_agent_from_raw() {
+  # Фallback: тянем файлы агента напрямую из GitHub RAW
+  echo "[*] Скачиваю файлы агента из GitHub (RAW)…"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn_agent.sh"      -o "$AGENT_BIN"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-agent.service" -o "$AGENT_SERVICE"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-agent.timer"   -o "$AGENT_TIMER"
+  chmod 0755 "$AGENT_BIN"
+  chmod 0644 "$AGENT_SERVICE" "$AGENT_TIMER"
+  crlf_fix "$AGENT_BIN" "$AGENT_SERVICE" "$AGENT_TIMER"
+}
+
 install_agent() {
   need_root
   local server secret node meta eoa peers dashurl
@@ -173,18 +208,22 @@ install_agent() {
   peers="$(ask "GSWARM_PEER_IDS (через запятую, опционально)" "")"
   dashurl="$(ask "DASH_URL (адрес этой ноды в дашборде, опционально)" "")"
 
-  local agent_src="$REPO_ROOT/agents/linux/gensyn_agent.sh"
-  local svc_src="$REPO_ROOT/agents/linux/gensyn-agent.service"
-  local tmr_src="$REPO_ROOT/agents/linux/gensyn-agent.timer"
+  # 1) пытаемся взять файлы из локального/свежесклонированного репозитория
+  local agents_dir
+  agents_dir="$(ensure_repo_for_agent || true)"
 
-  if [[ ! -f "$agent_src" || ! -f "$svc_src" || ! -f "$tmr_src" ]]; then
-    echo "[!] Не найдены файлы агента в $REPO_ROOT/agents/linux. Укажите корректный REPO_ROOT."
-    exit 1
+  if [[ -n "$agents_dir" ]]; then
+    echo "[*] Использую файлы агента из: $agents_dir"
+    install -m0755 "$agents_dir/gensyn_agent.sh" "$AGENT_BIN"
+    install -m0644 "$agents_dir/gensyn-agent.service" "$AGENT_SERVICE"
+    install -m0644 "$agents_dir/gensyn-agent.timer"   "$AGENT_TIMER"
+    crlf_fix "$AGENT_BIN" "$AGENT_SERVICE" "$AGENT_TIMER"
+  else
+    # 2) нет репозитория — скачиваем RAW
+    install_agent_from_raw
   fi
 
-  install -m0755 "$agent_src" "$AGENT_BIN"
-  crlf_fix "$AGENT_BIN"
-
+  # Конфиг агента
   cat >"$AGENT_ENV" <<EOF
 SERVER_URL=${server}
 SHARED_SECRET=${secret}
@@ -196,11 +235,6 @@ DASH_URL=${dashurl}
 EOF
   chmod 0644 "$AGENT_ENV"
   crlf_fix "$AGENT_ENV"
-
-  # Ставим unit-файлы (из репозитория → системные каталоги)
-  install -m0644 "$svc_src" "$AGENT_SERVICE"
-  install -m0644 "$tmr_src" "$AGENT_TIMER"
-  crlf_fix "$AGENT_SERVICE" "$AGENT_TIMER"
 
   systemctl daemon-reload
   systemctl enable --now "$(basename "$AGENT_TIMER")"
