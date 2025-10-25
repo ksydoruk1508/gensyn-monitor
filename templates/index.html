@@ -5,22 +5,58 @@
   <title>{{ site_title }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; margin: 24px; }
+    :root {
+      color-scheme: light;
+      --bg: #f8f9fb;
+      --text: #111;
+      --muted: #666;
+      --border: #ddd;
+      --card-bg: #fff;
+    }
+    body.dark {
+      --bg: #0f1116;
+      --text: #f5f5f5;
+      --muted: #bbb;
+      --border: #2a2d37;
+      --card-bg: #1a1d24;
+      color-scheme: dark;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif;
+      margin: 24px;
+      transition: background .2s ease, color .2s ease;
+    }
     h1 { margin: 0 0 12px; }
-    .muted { color: #666; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: middle; }
-    th { font-weight: 600; }
+    .muted { color: var(--muted); }
+    table { border-collapse: collapse; width: 100%; background: var(--card-bg); border-radius: 12px; overflow: hidden; }
+    th, td { border-bottom: 1px solid var(--border); padding: 10px; text-align: left; vertical-align: middle; }
+    th { font-weight: 600; background: var(--card-bg); }
     code { background: rgba(127,127,127,.12); padding: 2px 6px; border-radius: 6px; }
+    body.dark code { background: rgba(255,255,255,.08); }
     .UP { color: #1a7f37; font-weight: 700; }
     .DOWN { color: #b00020; font-weight: 700; }
-    .pill { border: 1px solid #ccc; padding: 2px 6px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
-    .toolbar { display: flex; gap: 8px; margin: 10px 0 18px; align-items: center; }
-    .badge { font-size: 12px; border: 1px solid #ccc; border-radius: 999px; padding: 2px 8px; }
-    button { padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background: transparent; cursor: pointer; }
+    .pill { border: 1px solid var(--border); padding: 2px 6px; border-radius: 999px; font-size: 12px; white-space: nowrap; background: var(--bg); }
+    .toolbar { display: flex; gap: 8px; margin: 10px 0 18px; align-items: center; flex-wrap: wrap; }
+    .badge { font-size: 12px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; }
+    button { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: transparent; cursor: pointer; color: inherit; }
     button:active { transform: translateY(1px); }
-    tfoot td { padding-top: 12px; font-size: 12px; color: #666; }
+    tfoot td { padding-top: 12px; font-size: 12px; color: var(--muted); background: var(--card-bg); }
+    .gswarm-card { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+    .gswarm-head { font-weight: 600; }
+    .peer-list { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; }
+    .peer-badge { border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 12px; background: var(--card-bg); box-shadow: inset 0 0 0 1px rgba(0,0,0,0.02); }
+    .peer-badge code { font-size: 12px; display: block; margin-bottom: 4px; word-break: break-all; }
+    .peer-badge div:last-child { font-size: 12px; color: var(--text); }
+    .warn { color: #d97706; font-size: 12px; }
+    .small { font-size: 11px; }
+    .detail-row td { background: rgba(127,127,127,.08); border-top: none; border-bottom: 1px solid var(--border); padding: 16px; }
+    body.dark .detail-row td { background: rgba(255,255,255,.04); }
+    .detail-row.hidden { display: none; }
+    tr.node-row { cursor: pointer; }
+    tr.node-row:hover { background: rgba(127,127,127,.08); }
+    body.dark tr.node-row:hover { background: rgba(255,255,255,.05); }
   </style>
 </head>
 <body>
@@ -28,6 +64,7 @@
   <div class="toolbar">
     <span class="badge">Порог неактивности: {{ threshold }}s</span>
     <button id="refreshBtn">Обновить</button>
+    <button id="themeBtn">Dark mode</button>
     <span class="muted" id="updatedAt"></span>
   </div>
 
@@ -39,38 +76,117 @@
         <th>Статус</th>
         <th>Последний heartbeat</th>
         <th>Возраст, сек</th>
+        <th>G-Swarm</th>
         <th>Meta</th>
       </tr>
     </thead>
     <tbody></tbody>
-    <tfoot><tr><td colspan="6" class="muted">Автообновление каждые 10 секунд</td></tr></tfoot>
+    <tfoot><tr><td colspan="7" class="muted">Автообновление каждые 10 секунд</td></tr></tfoot>
   </table>
 
 <script>
 const fmtTs = (ts) => new Date(ts * 1000).toLocaleString();
+const shortPeer = (pid = '') => pid.length > 8 ? `${pid.slice(0, 3)}...${pid.slice(-3)}` : pid;
+const esc = (str = '') => String(str).replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const formatCheckTime = (str) => {
+  if (!str) return '';
+  const iso = str.includes('T') ? str : `${str.replace(' ', 'T')}Z`;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? str : d.toLocaleString();
+};
 const tbody = document.querySelector('#tbl tbody');
 const updatedAtEl = document.getElementById('updatedAt');
+const expandedNodes = new Set();
+
+function renderGswarmSummary(gs) {
+  if (!gs) return '<span class="muted">—</span>';
+  const stats = gs.stats || {};
+  const totals = stats.totals || {};
+  const wins = totals.wins ?? '—';
+  const rew = totals.rewards ?? '—';
+  const peers = (gs.peer_ids && gs.peer_ids.length) ? gs.peer_ids.length : (totals.peers ?? '—');
+  const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
+  const eoa = gs.eoa || stats.eoa;
+  return `<div>
+    <div><strong>Wins ${wins}</strong> · Rewards ${rew}</div>
+    <div class="muted small">Peers: ${peers}${last ? ` · Last ${esc(last)}` : ''}</div>
+    ${eoa ? `<div class="muted small">EOA: <code>${esc(eoa)}</code></div>` : ''}
+  </div>`;
+}
+
+function renderGswarmDetail(gs) {
+  if (!gs) {
+    return '<div class="muted">G-Swarm данные отсутствуют</div>';
+  }
+  const stats = gs.stats || {};
+  const totals = stats.totals || {};
+  const per = stats.per_peer || {};
+  const peers = (gs.peer_ids && gs.peer_ids.length ? gs.peer_ids : Object.keys(per)).filter(Boolean);
+  const peerCards = peers.map((pid) => {
+    const data = per[pid] || {};
+    const wins = data.wins ?? 0;
+    const rewards = data.rewards ?? 0;
+    const rank = data.rank ? `Top #${esc(data.rank)}` : '—';
+    return `<div class="peer-badge">
+      <div><code>${esc(pid)}</code></div>
+      <div>${wins} wins · ${rewards} rewards · ${rank}</div>
+    </div>`;
+  }).join('');
+  const missing = stats.missing_peers && stats.missing_peers.length
+    ? `<div class="warn">Missing peers: ${stats.missing_peers.map((p) => esc(p)).join(', ')}</div>`
+    : '';
+  const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
+  const eoaVal = gs.eoa || stats.eoa;
+  const eoa = eoaVal ? `<div class="small">EOA: <code>${esc(eoaVal)}</code></div>` : '';
+  return `<div class="gswarm-card">
+    <div class="gswarm-head">Wins ${totals.wins ?? 0} · Rewards ${totals.rewards ?? 0}</div>
+    <div class="peer-list">${peerCards || '<span class="muted">Peers не заданы</span>'}</div>
+    ${missing}
+    ${eoa}
+    ${last ? `<div class="small">Last: ${esc(last)}</div>` : ''}
+  </div>`;
+}
 
 async function load() {
   try {
     const res = await fetch('/api/nodes', { cache: 'no-store' });
     const data = await res.json();
 
-    // сортировка: DOWN сверху
     data.sort((a,b) => (a.computed === 'DOWN') === (b.computed === 'DOWN') ? a.node_id.localeCompare(b.node_id) : (a.computed === 'DOWN' ? -1 : 1));
 
     tbody.innerHTML = '';
     for (const n of data) {
       const tr = document.createElement('tr');
+      tr.classList.add('node-row');
+      const metaFull = (n.meta || '').toString();
+      const metaShort = metaFull.slice(0, 80);
       tr.innerHTML = `
-        <td><code>${n.node_id}</code></td>
-        <td><code>${n.ip || ''}</code></td>
+        <td><code>${esc(n.node_id)}</code></td>
+        <td><code>${esc(n.ip || '')}</code></td>
         <td class="${n.computed}">${n.computed}</td>
         <td class="muted">${fmtTs(n.last_seen)}</td>
         <td>${n.age_sec}</td>
-        <td><span class="pill" title="${(n.meta||'').toString()}">${(n.meta||'').toString().slice(0,80)}</span></td>
+        <td>${renderGswarmSummary(n.gswarm)}</td>
+        <td><span class="pill" title="${esc(metaFull)}">${esc(metaShort)}</span></td>
       `;
+
+      const detail = document.createElement('tr');
+      detail.className = 'detail-row hidden';
+      detail.innerHTML = `<td colspan="7">${renderGswarmDetail(n.gswarm)}</td>`;
+
+      tr.addEventListener('click', () => {
+        if (detail.classList.toggle('hidden')) {
+          expandedNodes.delete(n.node_id);
+        } else {
+          expandedNodes.add(n.node_id);
+        }
+      });
+
       tbody.appendChild(tr);
+      tbody.appendChild(detail);
+      if (expandedNodes.has(n.node_id)) {
+        detail.classList.remove('hidden');
+      }
     }
     updatedAtEl.textContent = 'Обновлено: ' + new Date().toLocaleTimeString();
   } catch (e) {
@@ -79,6 +195,19 @@ async function load() {
 }
 
 document.getElementById('refreshBtn').addEventListener('click', load);
+const themeBtn = document.getElementById('themeBtn');
+function applyTheme(theme) {
+  document.body.classList.toggle('dark', theme === 'dark');
+  themeBtn.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+}
+const savedTheme = localStorage.getItem('theme') || 'light';
+applyTheme(savedTheme);
+themeBtn.addEventListener('click', () => {
+  const next = document.body.classList.contains('dark') ? 'light' : 'dark';
+  localStorage.setItem('theme', next);
+  applyTheme(next);
+});
+
 load();
 setInterval(load, 10000);
 </script>

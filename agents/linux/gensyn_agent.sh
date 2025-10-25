@@ -13,6 +13,8 @@ SCREEN_NAME="${SCREEN_NAME:-gensyn}"
 CHECK_PORT="${CHECK_PORT:-true}" # check local UI port 3000
 PORT="${PORT:-3000}"
 IP_CMD="${IP_CMD:-https://ifconfig.me}"
+GSWARM_EOA="${GSWARM_EOA:-}"
+GSWARM_PEER_IDS="${GSWARM_PEER_IDS:-}"  # comma-separated or JSON array
 
 # Extra detection knobs
 AUTO_KILL_EMPTY_SCREEN="${AUTO_KILL_EMPTY_SCREEN:-false}"
@@ -41,6 +43,14 @@ fi
 # --- Helpers -------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
 log()  { printf '[%s] %s\n' "$(date -u +%F'T'%T'Z')" "$*" >&2; }
+json_escape() {
+  local str="${1:-}"
+  str=${str//\\/\\\\}
+  str=${str//\"/\\\"}
+  str=${str//$'\n'/\\n}
+  str=${str//$'\r'/\\r}
+  printf '%s' "$str"
+}
 
 # screen name like "12345.gensyn"
 screen_session_name() {
@@ -167,8 +177,18 @@ IP="$(public_ip)"
 META_OUT="${META}"
 [[ -n "$reason" && "$status" != "UP" ]] && META_OUT="${META:+$META,}reason=${reason}"
 
-payload=$(printf '{"node_id":"%s","ip":"%s","meta":"%s","status":"%s"}' \
-  "$NODE_ID" "${IP}" "${META_OUT}" "${status}")
+payload=$(printf '{"node_id":"%s","ip":"%s","meta":"%s","status":"%s"' \
+  "$(json_escape "$NODE_ID")" \
+  "$(json_escape "$IP")" \
+  "$(json_escape "$META_OUT")" \
+  "$(json_escape "$status")")
+if [[ -n "$GSWARM_EOA" ]]; then
+  payload=$(printf '%s,"gswarm_eoa":"%s"' "$payload" "$(json_escape "$GSWARM_EOA")")
+fi
+if [[ -n "$GSWARM_PEER_IDS" ]]; then
+  payload=$(printf '%s,"gswarm_peer_ids":"%s"' "$payload" "$(json_escape "$GSWARM_PEER_IDS")")
+fi
+payload="${payload}}"
 
 # --- Send heartbeat ------------------------------------------------------------
 if ! have curl; then

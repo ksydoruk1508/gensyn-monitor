@@ -106,23 +106,41 @@ def _fetch_offchain(peer_ids: List[str]) -> Tuple[Dict[str, Dict[str, int]], Dic
         totals["rewards"] += rew
     return per, totals
 
-def run_once(send_telegram: bool = False) -> Dict[str, Any]:
-    """Основной запуск: собирает peers → on-chain → off-chain → строит HTML.
+def run_once(
+    send_telegram: bool = False,
+    extra_peer_ids: List[str] | None = None,
+    extra_eoas: List[str] | None = None,
+) -> Dict[str, Any]:
+    """Основной запуск: собирает peers (включая переданные явно) → on-chain → off-chain → HTML.
     Возвращает словарь с данными и HTML. При send_telegram=True отправляет в Telegram."""
     w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
 
-    # peers из всех прокси и всех EOA
+    extra_peer_ids = [p.strip() for p in (extra_peer_ids or []) if p.strip()]
+    extra_eoas = [e.strip() for e in (extra_eoas or []) if e.strip()]
+    eoas = list(dict.fromkeys([*EOA_ADDRESSES, *extra_eoas]))
+
+    # peers из всех прокси и всех EOA, плюс карта EOA -> peerIds
     peers: list[str] = []
+    eoa_map: Dict[str, List[str]] = {}
     for px in PROXIES:
         c = w3.eth.contract(address=Web3.to_checksum_address(px), abi=ABI)
-        for eoa in EOA_ADDRESSES:
+        for eoa in eoas or []:
             try:
                 e = Web3.to_checksum_address(eoa)
                 got = c.functions.getPeerId([e]).call()
-                peers += (got[0] if got else [])
+                fetched = [p for p in (got[0] if got else []) if p]
+                if fetched:
+                    peers += fetched
+                    key = e.lower()
+                    eoa_map.setdefault(key, [])
+                    eoa_map[key].extend(fetched)
             except Exception:
                 pass
-    peers = list(dict.fromkeys([p for p in peers if p]))
+    peers = list(dict.fromkeys(peers))
+    for eoa_key, plist in list(eoa_map.items()):
+        eoa_map[eoa_key] = list(dict.fromkeys(plist))
+    if extra_peer_ids:
+        peers = list(dict.fromkeys([*peers, *extra_peer_ids]))
 
     # on-chain wins/rewards (rewards может отсутствовать)
     on_wins = {pid: 0 for pid in peers}
@@ -266,6 +284,7 @@ def run_once(send_telegram: bool = False) -> Dict[str, Any]:
         "sent": sent,
         "send_error": send_error,
         "ts": ts,
+        "eoa_peers": eoa_map,
     }
 
 if __name__ == "__main__":
