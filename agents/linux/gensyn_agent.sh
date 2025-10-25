@@ -14,14 +14,22 @@ CHECK_PORT="${CHECK_PORT:-true}" # check local UI port 3000
 PORT="${PORT:-3000}"
 IP_CMD="${IP_CMD:-https://ifconfig.me}"
 
-# Доп. параметры детекции
+# Extra detection knobs
 AUTO_KILL_EMPTY_SCREEN="${AUTO_KILL_EMPTY_SCREEN:-false}"
-# «боевые» процессы (нода реально работает)
+
+# Runtime “allow/deny”
 ALLOW_REGEX="${ALLOW_REGEX:-rgym_exp\.runner\.swarm_launcher|hivemind_cli/p2pd|(^|[/[:space:]])rl-swarm([[:space:]]|$)|python[^ ]*.*rgym_exp}"
-# «обёртки»/стабы (не считаем здоровьем)
 DENY_REGEX="${DENY_REGEX:-run_rl_swarm\.sh|while[[:space:]]+true|sleep[[:space:]]+60}"
-# считать UP, если боевой процесс найден без screen
+
+# Consider UP if target process exists outside screen
 PROC_FALLBACK_WITHOUT_SCREEN="${PROC_FALLBACK_WITHOUT_SCREEN:-true}"
+
+# Variant A: require p2pd presence
+REQUIRE_P2PD="${REQUIRE_P2PD:-false}"
+
+# Variant B: require fresh log
+LOG_FILE="${LOG_FILE:-}"            # e.g. /root/rl-swarm/logs/swarm.log
+LOG_MAX_AGE="${LOG_MAX_AGE:-300}"   # seconds
 
 # Optional: global env file
 if [[ -f /etc/gensyn-agent.env ]]; then
@@ -31,10 +39,9 @@ fi
 
 # --- Helpers -------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
-
 log() { printf '[%s] %s\n' "$(date -u +%F'T'%T'Z')" "$*" >&2; }
 
-# Имя screen-сессии вида "12345.gensyn"
+# screen name like "12345.gensyn"
 screen_session_name() {
   have screen || return 1
   screen -list 2>/dev/null \
@@ -42,40 +49,50 @@ screen_session_name() {
     | head -n1
 }
 
-# Есть ли В ЭТОЙ screen «боевой» процесс (по ALLOW), не попадающий под DENY?
+# Is there an ALLOW process in THIS screen (and not matching DENY)?
 has_target_in_screen() {
   local sname="$1" p args
   [[ -z "$sname" ]] && return 1
   have pgrep || return 1
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
-    # процесс действительно запущен внутри этой screen? (проверяем STY)
     if tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "STY=$sname"; then
       args=$(ps -p "$p" -o args= 2>/dev/null || true)
-      # отфильтруем обёртки
       if ! grep -Eiq "$DENY_REGEX" <<<"$args"; then
         return 0
       fi
     fi
-  done < <(pgrep -f "$ALLOW_REGEX" 2>/dev/null)
+  done < <(pgrep -f "$ALLOW_REGEX" 2>/dev/null || true)
   return 1
 }
 
-screen_ok() {
-  # screen считается «ок», если есть именованная сессия и в ней найден боевой процесс
-  local sname; sname="$(screen_session_name || true)"
-  [[ -n "$sname" ]] && has_target_in_screen "$sname"
+# Is p2pd running inside THIS screen?
+p2pd_ok_in_screen() {
+  local sname="$1"
+  [[ -z "$sname" ]] && return 1
+  have pgrep || return 1
+  for pid in $(pgrep -f 'hivemind_cli/p2pd' 2>/dev/null || true); do
+    if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "STY=$sname"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
+# Is p2pd running anywhere (used when there's no screen fallback)?
+p2pd_ok_global() {
+  have pgrep && pgrep -f 'hivemind_cli/p2pd' >/dev/null 2>&1
+}
+
+# If no screen allowed: any ALLOW process?
 proc_ok() {
-  # если нет screen — по желанию считаем UP при наличии боевых процессов без screen
   [[ "$PROC_FALLBACK_WITHOUT_SCREEN" != "true" ]] && return 1
   have pgrep && pgrep -f "$ALLOW_REGEX" >/dev/null 2>&1
 }
 
+# Port check
 port_ok() {
   if [[ "${CHECK_PORT}" != "true" ]]; then return 0; fi
-  # Try bash /dev/tcp; fallback to nc if available
   if timeout 1 bash -c ">/dev/tcp/127.0.0.1/${PORT}" 2>/dev/null; then
     return 0
   elif have nc && nc -z -w1 127.0.0.1 "${PORT}" >/dev/null 2>&1; then
@@ -84,30 +101,63 @@ port_ok() {
   return 1
 }
 
+# Log freshness (Variant B)
+log_fresh() {
+  [[ -z "${LOG_FILE}" ]] && return 0
+  [[ ! -f "${LOG_FILE}" ]] && return 1
+  local now ts age
+  now=$(date +%s)
+  ts=$(stat -c %Y "${LOG_FILE}" 2>/dev/null || echo 0)
+  age=$(( now - ts ))
+  [[ ${age} -le ${LOG_MAX_AGE} ]]
+}
+
 public_ip() {
   (curl -fsS --max-time 2 "${IP_CMD}" || true) | tr -d '\r\n'
 }
 
 # --- Health check --------------------------------------------------------------
 status="DOWN"
+reason=""
 
-# Определим имя сессии один раз (для авто-килла)
 sname="$(screen_session_name || true)"
 
 if [[ -n "$sname" ]]; then
-  if has_target_in_screen "$sname" && port_ok; then
-    status="UP"
+  # must have target process in screen
+  if ! has_target_in_screen "$sname"; then
+    reason="empty_screen_no_runtime"
+  # optionally require p2pd in SAME screen
+  elif [[ "${REQUIRE_P2PD}" == "true" ]] && ! p2pd_ok_in_screen "$sname"; then
+    reason="p2pd_missing_in_screen"
+  # port must be OK if enabled
+  elif ! port_ok; then
+    reason="port_closed_${PORT}"
+  # log must be fresh if configured
+  elif ! log_fresh; then
+    reason="stale_log"
   else
-    # пустая screen — можно аккуратно закрыть (опционально)
-    if [[ "$AUTO_KILL_EMPTY_SCREEN" == "true" ]]; then
-      screen -S "$SCREEN_NAME" -X quit || true
-      log "INFO: auto-closed empty screen $SCREEN_NAME"
-    fi
+    status="UP"
+  fi
+
+  # Optional autoclose empty screen
+  if [[ "$status" == "DOWN" && "$reason" == "empty_screen_no_runtime" && "$AUTO_KILL_EMPTY_SCREEN" == "true" ]]; then
+    screen -S "$SCREEN_NAME" -X quit || true
+    log "INFO: auto-closed empty screen $SCREEN_NAME"
   fi
 else
-  # без screen: допускаем UP, если боевой процесс есть и порт ок (если включено)
-  if proc_ok && port_ok; then
-    status="UP"
+  # No screen found — allow fallback if enabled
+  if proc_ok; then
+    if [[ "${REQUIRE_P2PD}" == "true" ]] && ! p2pd_ok_global; then
+      reason="p2pd_missing"
+    elif ! port_ok; then
+      reason="port_closed_${PORT}"
+    elif ! log_fresh; then
+      reason="stale_log"
+    else
+      status="UP"
+    fi
+  else
+    reason="no_screen_no_proc"
   fi
 fi
 
@@ -129,5 +179,4 @@ curl -fsS -X POST "${SERVER_URL%/}/api/heartbeat" \
     exit 0
   }
 
-# optional local log
-log "beat node_id=${NODE_ID} status=${status} ip=${IP}"
+log "beat node_id=${NODE_ID} status=${status} ip=${IP}${reason:+ reason=${reason}}"
