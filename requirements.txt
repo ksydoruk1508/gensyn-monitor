@@ -4,3 +4,4 @@ aiosqlite
 jinja2
 python-dotenv
 httpx
+web3>=6

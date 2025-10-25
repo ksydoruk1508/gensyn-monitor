@@ -1,10 +1,11 @@
 from typing import Optional
 import os, asyncio, time
-from fastapi import FastAPI, Request, HTTPException, Header, Body
+from fastapi import FastAPI, Request, HTTPException, Header, Body, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import aiosqlite, httpx
 from dotenv import load_dotenv
+from integrations.gswarm_checker import run_once
 
 # ── Конфиг ─────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -171,6 +172,16 @@ async def index(request: Request):
         "index.html",
         {"request": request, "site_title": SITE_TITLE, "threshold": THRESHOLD}
     )
+
+@app.post("/api/gswarm/check")
+def gswarm_check(send: bool = Query(False, description="Отправить в Telegram")):
+    """
+    Разовый сбор G-Swarm метрик.
+    send=true — сразу отправить HTML-репорт в Telegram (если TELEGRAM_* заданы).
+    """
+    result = run_once(send_telegram=send)
+    # Возвращаем JSON + HTML, чтобы можно было показать превью в UI/скриптах
+    return result
 
 # ── Админ-API ─────────────────────────────────────────────────────────────────
 @app.post("/api/admin/rename")
