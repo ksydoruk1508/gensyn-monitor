@@ -12,18 +12,31 @@ load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("gensyn-monitor")
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    cleaned = str(raw).split("#", 1)[0].strip()
+    if not cleaned:
+        return default
+    try:
+        return int(cleaned)
+    except ValueError:
+        logger.warning("Invalid integer for %s: %r (using default=%s)", name, raw, default)
+        return default
+
 BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 SHARED     = os.getenv("SHARED_SECRET", "")
-THRESHOLD  = int(os.getenv("DOWN_THRESHOLD_SEC", "180"))  # сек. до статуса DOWN
+THRESHOLD  = _env_int("DOWN_THRESHOLD_SEC", 180)  # сек. до статуса DOWN
 SITE_TITLE = os.getenv("SITE_TITLE", "Gensyn Nodes")
 
 # Админ-опции
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")                 # Bearer токен админа
-PRUNE_DAYS  = int(os.getenv("PRUNE_DAYS", "0"))            # 0 = не чистить
+PRUNE_DAYS  = _env_int("PRUNE_DAYS", 0)            # 0 = не чистить
 
 # G-Swarm фоновые обновления
-GSWARM_REFRESH_INTERVAL = int(os.getenv("GSWARM_REFRESH_INTERVAL", "600"))
+GSWARM_REFRESH_INTERVAL = _env_int("GSWARM_REFRESH_INTERVAL", 600)
 GSWARM_AUTO_SEND = os.getenv("GSWARM_AUTO_SEND", "0") == "1"
 GSWARM_NODE_MAP_RAW = os.getenv("GSWARM_NODE_MAP", "").strip()
 
@@ -365,32 +378,13 @@ def _aggregate_nodes(per_peer: Dict[str, Dict[str, Any]], node_configs: Dict[str
             aggregated[node_id] = stats
     return aggregated
 
-async def refresh_gswarm_stats():
-    logger.info("[GSWARM] refresh: collecting sources…")
-    eoas, node_configs = await _gswarm_sources()
-    extra_peer_ids = sorted({pid for cfg in node_configs.values() for pid in cfg.get("peer_ids", [])})
-    if not node_configs and not eoas:
-        logger.info("[GSWARM] refresh: nothing to do (no node configs / EOAs)")
-        return
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(
-            None,
-            lambda: run_once(
-                send_telegram=GSWARM_AUTO_SEND,
-                extra_peer_ids=extra_peer_ids,
-                extra_eoas=eoas,
-            ),
-        )
-    except Exception as exc:
-        logger.exception("[GSWARM] refresh failed: %s", exc)
-        return
-
-    per_peer = result.get("per_peer", {})
+async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str, Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], int]:
+    if not node_configs:
+        return {}, 0
+    per_peer = result.get("per_peer", {}) or {}
     last_check = result.get("ts")
     eoa_peer_map = result.get("eoa_peers", {}) or {}
     _apply_auto_peers(node_configs, eoa_peer_map)
-
     now_ts = int(time.time())
     node_stats = _aggregate_nodes(per_peer, node_configs, last_check)
 
@@ -416,9 +410,33 @@ async def refresh_gswarm_stats():
             if stats:
                 updated_count += 1
         await db.commit()
+    return node_stats, updated_count
+
+async def refresh_gswarm_stats():
+    logger.info("[GSWARM] refresh: collecting sources…")
+    eoas, node_configs = await _gswarm_sources()
+    extra_peer_ids = sorted({pid for cfg in node_configs.values() for pid in cfg.get("peer_ids", [])})
+    if not node_configs and not eoas:
+        logger.info("[GSWARM] refresh: nothing to do (no node configs / EOAs)")
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_once(
+                send_telegram=GSWARM_AUTO_SEND,
+                extra_peer_ids=extra_peer_ids,
+                extra_eoas=eoas,
+            ),
+        )
+    except Exception as exc:
+        logger.exception("[GSWARM] refresh failed: %s", exc)
+        return
+
+    _, updated_count = await _persist_gswarm_result(result, node_configs)
 
     logger.info("[GSWARM] refresh ok: nodes=%d, peers=%d, wins=%s, rewards=%s, updated=%d",
-                len(node_configs), len(per_peer),
+                len(node_configs), len(result.get("per_peer", {})),
                 result.get("totals",{}).get("wins"), result.get("totals",{}).get("rewards"),
                 updated_count)
 
@@ -517,9 +535,8 @@ async def gswarm_check(
         extra_eoas=extra_eoas,
     )
     if include_nodes and node_configs:
-        eoa_peer_map = result.get("eoa_peers", {}) or {}
-        _apply_auto_peers(node_configs, eoa_peer_map)
-        result["nodes"] = _aggregate_nodes(result.get("per_peer", {}), node_configs, result.get("ts"))
+        node_stats, _ = await _persist_gswarm_result(result, node_configs)
+        result["nodes"] = node_stats
     return result
 
 # ── Админ-API ─────────────────────────────────────────────────────────────────
@@ -587,3 +604,5 @@ async def admin_gswarm_refresh(authorization: Optional[str] = Header(default=Non
         raise HTTPException(401, "Unauthorized")
     await refresh_gswarm_stats()
     return {"ok": True}
+
+

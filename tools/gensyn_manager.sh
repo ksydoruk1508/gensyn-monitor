@@ -41,6 +41,19 @@ need_root() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+current_repo_dir() {
+  local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+  if [[ -f "$service_file" ]]; then
+    local dir
+    dir=$(awk -F= '/^WorkingDirectory=/{print $2; exit}' "$service_file")
+    if [[ -n "$dir" ]]; then
+      printf '%s' "$dir"
+      return 0
+    fi
+  fi
+  printf '%s' "$REPO_DIR"
+}
+
 ask() {
   local prompt="$1" default="${2:-}"
   local value
@@ -60,6 +73,19 @@ print(shlex.quote(value))
 PY
   else
     printf '%q' "$1"
+  fi
+}
+
+json_string() {
+  if have_cmd python3; then
+    python3 - "$1" <<'PY'
+import json, sys
+print(json.dumps(sys.argv[1] if len(sys.argv) > 1 else ""))
+PY
+  else
+    local val="${1//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    printf '"%s"' "$val"
   fi
 }
 
@@ -86,6 +112,37 @@ wait_port_free() {
     echo "    Выберите другой порт или остановите процесс, занимающий порт."
     exit 1
   fi
+}
+
+maybe_open_firewall_port() {
+  local port="$1"
+  local answer
+  read -rp "Открыть порт ${port}/tcp во внешнем firewall? (y/N): " answer || true
+  case "${answer,,}" in
+    y|yes)
+      if have_cmd ufw; then
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -n1)
+        if [[ "$ufw_status" =~ inactive ]]; then
+          echo "[i] ufw установлен, но не активен — правило не добавлено."
+        else
+          echo "[*] Добавляю правило ufw allow ${port}/tcp"
+          ufw allow "${port}/tcp" >/dev/null 2>&1 || ufw allow "${port}" >/dev/null 2>&1 || true
+          ufw reload >/dev/null 2>&1 || true
+        fi
+      elif have_cmd firewall-cmd; then
+        echo "[*] Добавляю правило firewalld для ${port}/tcp"
+        firewall-cmd --add-port="${port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+      else
+        echo "[!] Поддерживаемый firewall не найден (ufw/firewalld). Добавьте правило вручную при необходимости."
+      fi
+      ;;
+    *)
+      echo "[i] Пропускаю настройку firewall."
+      ;;
+  esac
 }
 
 prepare_device() {
@@ -137,6 +194,7 @@ install_monitor() {
   repo="$(ask "Каталог для установки репозитория" "$REPO_DIR")"
 
   wait_port_free "$port"
+  maybe_open_firewall_port "$port"
   clone_or_update_repo "$repo"
 
   cd "$repo"
@@ -210,15 +268,16 @@ install_agent_from_raw() {
 
 install_agent() {
   need_root
-  local server secret node meta eoa peers dashurl admin_token
-  server="$(ask "URL мониторинга (например http://host:8080)")"
-  secret="$(ask "SHARED_SECRET" "")"
-  node="$(ask "NODE_ID" "$(hostname)-gensyn")"
-  meta="$(ask "META (произвольная строка, можно пусто)" "")"
-  eoa="$(ask "GSWARM_EOA (0x… — EOA адрес, опционально)" "")"
-  peers="$(ask "GSWARM_PEER_IDS (через запятую, опционально)" "")"
-  dashurl="$(ask "DASH_URL (адрес этой ноды в дашборде, опционально)" "")"
-  admin_token="$(ask "ADMIN_TOKEN (для /api/admin/delete, опционально)" "")"
+  local server secret node node_default meta eoa peers dashurl admin_token
+  server="$(ask "URL мониторинга (например http://host:8080)" "${DEFAULT_SERVER_URL:-}")"
+  secret="$(ask "SHARED_SECRET" "${DEFAULT_SHARED_SECRET:-}")"
+  node_default="${DEFAULT_NODE_ID:-$(hostname)-gensyn}"
+  node="$(ask "NODE_ID" "$node_default")"
+  meta="$(ask "META (произвольная строка, можно пусто)" "${DEFAULT_META:-}")"
+  eoa="$(ask "GSWARM_EOA (0x… — EOA адрес, опционально)" "${DEFAULT_GSWARM_EOA:-}")"
+  peers="$(ask "GSWARM_PEER_IDS (через запятую, опционально)" "${DEFAULT_GSWARM_PEER_IDS:-}")"
+  dashurl="$(ask "DASH_URL (адрес этой ноды в дашборде, опционально)" "${DEFAULT_DASH_URL:-}")"
+  admin_token="$(ask "ADMIN_TOKEN (для /api/admin/delete, опционально)" "${DEFAULT_ADMIN_TOKEN:-}")"
 
   # 1) пытаемся взять файлы из локального/свежесклонированного репозитория
   local agents_dir
@@ -267,8 +326,58 @@ install_agent() {
 
 reinstall_agent() {
   need_root
+  local prev_server="" prev_node="" prev_admin="" prev_secret="" prev_meta="" prev_eoa="" prev_peers="" prev_dash=""
+  if [[ -f "$AGENT_ENV" ]]; then
+    set +u
+    source "$AGENT_ENV"
+    prev_server="${SERVER_URL:-}"
+    prev_node="${NODE_ID:-}"
+    prev_admin="${ADMIN_TOKEN:-}"
+    prev_secret="${SHARED_SECRET:-}"
+    prev_meta="${META:-}"
+    prev_eoa="${GSWARM_EOA:-}"
+    prev_peers="${GSWARM_PEER_IDS:-}"
+    prev_dash="${DASH_URL:-}"
+    set -u
+  fi
   systemctl disable --now "$(basename "$AGENT_TIMER")" "$(basename "$AGENT_SERVICE")" || true
+
+  export DEFAULT_SERVER_URL="${prev_server}"
+  export DEFAULT_SHARED_SECRET="${prev_secret}"
+  export DEFAULT_NODE_ID="${prev_node}"
+  export DEFAULT_META="${prev_meta}"
+  export DEFAULT_GSWARM_EOA="${prev_eoa}"
+  export DEFAULT_GSWARM_PEER_IDS="${prev_peers}"
+  export DEFAULT_DASH_URL="${prev_dash}"
+  export DEFAULT_ADMIN_TOKEN="${prev_admin}"
+
   install_agent
+
+  unset DEFAULT_SERVER_URL DEFAULT_SHARED_SECRET DEFAULT_NODE_ID DEFAULT_META \
+        DEFAULT_GSWARM_EOA DEFAULT_GSWARM_PEER_IDS DEFAULT_DASH_URL DEFAULT_ADMIN_TOKEN
+
+  local new_node="" new_server=""
+  if [[ -f "$AGENT_ENV" ]]; then
+    set +u
+    source "$AGENT_ENV"
+    new_node="${NODE_ID:-}"
+    new_server="${SERVER_URL:-}"
+    set -u
+  fi
+
+  if [[ -n "$prev_server" && -n "$prev_admin" && -n "$prev_node" && "$prev_node" != "$new_node" ]]; then
+    local endpoint="${prev_server%/}/api/admin/delete"
+    local payload
+    payload=$(json_string "$prev_node")
+    if curl -fsS -X POST "$endpoint" \
+         -H "Authorization: Bearer ${prev_admin}" \
+         -H "Content-Type: application/json" \
+         -d "{\"node_id\":${payload}}" >/dev/null 2>&1; then
+      echo "[+] Старый node_id ${prev_node} удалён с монитора."
+    else
+      echo "[!] Не удалось удалить старый node_id ${prev_node} с монитора (пропущено)." >&2
+    fi
+  fi
 }
 
 show_agent_env() {
@@ -291,11 +400,20 @@ remove_monitor() {
   rm -f /etc/systemd/system/${SERVICE_NAME}.service
   systemctl daemon-reload
 
-  local answer
-  answer="$(ask "Удалить директорию репозитория? Введите путь (пусто = не удалять)" "")"
-  if [[ -n "$answer" && -d "$answer" ]]; then
-    rm -rf "$answer"
-    echo "[+] Удалён $answer"
+  local default_repo delete_choice answer
+  default_repo="$(current_repo_dir)"
+  echo "[i] Текущий каталог дашборда: ${default_repo}"
+  read -rp "Удалить директорию репозитория (${default_repo})? (y/N): " delete_choice || true
+  if [[ "${delete_choice,,}" == "y" || "${delete_choice,,}" == "yes" ]]; then
+    answer="$(ask "Укажите путь для удаления" "$default_repo")"
+    if [[ -n "$answer" && -d "$answer" ]]; then
+      rm -rf "$answer"
+      echo "[+] Удалён $answer"
+    else
+      echo "[i] Каталог не найден или не указан — пропущено."
+    fi
+  else
+    echo "[i] Каталог оставлен."
   fi
   echo "[+] Мониторинг удалён"
 }
