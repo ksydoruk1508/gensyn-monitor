@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Gensyn Monitor helper.
 # Готовит сервер, ставит/обновляет/удаляет мониторинг и агента,
@@ -493,5 +493,6 @@ main() {
     esac
   done
 }
+
 
 main "$@"
