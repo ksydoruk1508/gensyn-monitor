@@ -228,6 +228,7 @@ prompt_monitor_env() {
   local _title="${DEFAULT_SITE_TITLE:-Gensyn Nodes}"
   local _thr="${DEFAULT_DOWN_THRESHOLD_SEC:-180}"
   local _interval="${DEFAULT_GSWARM_REFRESH_INTERVAL:-600}"
+  local _show_src="${DEFAULT_GSWARM_SHOW_SRC:-auto}"
   local _autosend="${DEFAULT_GSWARM_AUTO_SEND:-0}"
   local _nodemap="${DEFAULT_GSWARM_NODE_MAP:-}"
 
@@ -242,6 +243,7 @@ prompt_monitor_env() {
     _title="${_title:-${SITE_TITLE:-Gensyn Nodes}}"
     _thr="${_thr:-${DOWN_THRESHOLD_SEC:-180}}"
     _interval="${_interval:-${GSWARM_REFRESH_INTERVAL:-600}}"
+    _show_src="${_show_src:-${GSWARM_SHOW_SRC:-auto}}"
     _autosend="${_autosend:-${GSWARM_AUTO_SEND:-0}}"
     _nodemap="${_nodemap:-${GSWARM_NODE_MAP:-}}"
     set -u
@@ -262,6 +264,12 @@ prompt_monitor_env() {
   while [[ -n "$INTV" ]] && ! is_number "$INTV"; do
     echo "[!] Должно быть число."; INTV="$(ask "GSWARM_REFRESH_INTERVAL" "$_interval")"
   done
+
+  SHOW_SRC="$(ask "GSWARM_SHOW_SRC (auto/always/never)" "$_show_src")"
+  case "${SHOW_SRC,,}" in
+    always|never|auto) SHOW_SRC="${SHOW_SRC,,}" ;;
+    *) SHOW_SRC="auto" ;;
+  esac
 
   AUTOSEND="$(ask "GSWARM_AUTO_SEND (0/1)" "$_autosend")"
   [[ "$AUTOSEND" != "1" ]] && AUTOSEND="0"
@@ -284,6 +292,7 @@ prompt_monitor_env() {
     write_kv "SITE_TITLE" "$TITLE"
     write_kv "DOWN_THRESHOLD_SEC" "${THR:-180}"
     write_kv "GSWARM_REFRESH_INTERVAL" "${INTV:-600}"
+    write_kv "GSWARM_SHOW_SRC" "${SHOW_SRC:-auto}"
     write_kv "GSWARM_AUTO_SEND" "${AUTOSEND:-0}"
     if [[ -n "$NODEMAP_INPUT" ]]; then
       echo "GSWARM_NODE_MAP=$NODEMAP_INPUT"
