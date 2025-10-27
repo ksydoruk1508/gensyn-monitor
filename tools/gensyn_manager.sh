@@ -193,7 +193,7 @@ json_validate() {
     echo "$s" | jq -e . >/dev/null 2>&1
     return $?
   elif have_cmd python3; then
-    python3 - <<PY 2>/dev/null
+    python3 - <<'PY' 2>/dev/null
 import json,sys
 try:
     json.loads(sys.argv[1])
@@ -254,13 +254,13 @@ prompt_monitor_env() {
   TITLE="$(ask "SITE_TITLE" "$_title")"
 
   THR="$(ask "DOWN_THRESHOLD_SEC (в секундах)" "$_thr")"
-  while [[ -n "$THR" && ! $(is_number "$THR") ]]; do
-    echo "[!] Должно быть число." ; THR="$(ask "DOWN_THRESHOLD_SEC" "$_thr")"
+  while [[ -n "$THR" ]] && ! is_number "$THR"; do
+    echo "[!] Должно быть число."; THR="$(ask "DOWN_THRESHOLD_SEC" "$_thr")"
   done
 
   INTV="$(ask "GSWARM_REFRESH_INTERVAL (секунды)" "$_interval")"
-  while [[ -n "$INTV" && ! $(is_number "$INTV") ]]; do
-    echo "[!] Должно быть число." ; INTV="$(ask "GSWARM_REFRESH_INTERVAL" "$_interval")"
+  while [[ -n "$INTV" ]] && ! is_number "$INTV"; do
+    echo "[!] Должно быть число."; INTV="$(ask "GSWARM_REFRESH_INTERVAL" "$_interval")"
   done
 
   AUTOSEND="$(ask "GSWARM_AUTO_SEND (0/1)" "$_autosend")"
@@ -275,20 +275,16 @@ prompt_monitor_env() {
     NODEMAP_INPUT=""
   fi
 
-  if [[ -z "$TE_BOT" || -z "$TE_CHAT" || -z "$SHARED" ]]; then
-    echo "[!] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID/SHARED_SECRET обязательны — UI не запустится без них."
-  fi
-
   local tmp="$env_file.tmp.$$"
   {
     write_kv "TELEGRAM_BOT_TOKEN" "$TE_BOT"
-    write_kv "TELEGRAM_CHAT_ID"   "$TE_CHAT"
-    write_kv "SHARED_SECRET"      "$SHARED"
-    write_kv "ADMIN_TOKEN"        "$ADMIN"
-    write_kv "SITE_TITLE"         "$TITLE"
+    write_kv "TELEGRAM_CHAT_ID" "$TE_CHAT"
+    write_kv "SHARED_SECRET" "$SHARED"
+    write_kv "ADMIN_TOKEN" "$ADMIN"
+    write_kv "SITE_TITLE" "$TITLE"
     write_kv "DOWN_THRESHOLD_SEC" "${THR:-180}"
     write_kv "GSWARM_REFRESH_INTERVAL" "${INTV:-600}"
-    write_kv "GSWARM_AUTO_SEND"   "${AUTOSEND:-0}"
+    write_kv "GSWARM_AUTO_SEND" "${AUTOSEND:-0}"
     if [[ -n "$NODEMAP_INPUT" ]]; then
       echo "GSWARM_NODE_MAP=$NODEMAP_INPUT"
     else
@@ -298,8 +294,6 @@ prompt_monitor_env() {
   mv -f "$tmp" "$env_file"
   echo "[+] Файл .env обновлён: $env_file"
 }
-
-# ── Монитор (дашборд) ─────────────────────────────────────────────────────────
 
 install_monitor() {
   need_root
@@ -314,10 +308,8 @@ install_monitor() {
   cd "$repo"
   crlf_fix "$repo/.env" "$repo/example.env" || true
 
-  # 1) Сначала собираем .env (до старта сервиса)
   prompt_monitor_env "$repo"
 
-  # 2) venv и зависимости
   echo "[*] Настраиваем venv и зависимости…"
   python3 -m venv .venv
   source .venv/bin/activate
@@ -325,7 +317,6 @@ install_monitor() {
   pip install -r requirements.txt
   deactivate
 
-  # 3) systemd unit
   cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Gensyn Monitor (Uvicorn)
@@ -367,8 +358,6 @@ update_monitor() {
   systemctl restart ${SERVICE_NAME}.service
   echo "[+] Монитор обновлён и перезапущен."
 }
-
-# ── Агент ────────────────────────────────────────────────────────────────────
 
 install_agent_from_raw() {
   echo "[*] Скачиваю файлы агента из GitHub (RAW)…"
@@ -501,8 +490,6 @@ show_agent_env() {
   fi
 }
 
-# ── Служебные действия ───────────────────────────────────────────────────────
-
 monitor_status()   { systemctl status ${SERVICE_NAME}.service; }
 monitor_logs()     { journalctl -u ${SERVICE_NAME}.service -n 100 --no-pager; }
 agent_status()     { systemctl status "$(basename "$AGENT_TIMER")" "$(basename "$AGENT_SERVICE")"; }
@@ -564,8 +551,6 @@ remove_agent() {
 
   echo "[+] Агент удалён"
 }
-
-# ── Меню ─────────────────────────────────────────────────────────────────────
 
 menu() {
   cat <<'EOF'
