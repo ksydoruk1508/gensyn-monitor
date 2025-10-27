@@ -2,7 +2,7 @@
 import os, json, datetime, urllib.parse, urllib.request, urllib.error
 from pathlib import Path
 from urllib.error import HTTPError
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Set
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -201,12 +201,42 @@ def run_once(
     ranked_nodes = sum(1 for p in per_peer.values() if p["wins"]>0)
     html.append(f"🏆 Ranked Nodes: <b>{ranked_nodes}</b>\n\n")
     html.append("<b>📊 Blockchain Data Update</b>\n")
-    if len(EOA_ADDRESSES)==1:
-        html.append(f"👤 EOA Address: <code>{EOA_ADDRESSES[0]}</code>\n")
+
+    display_eoas: List[str] = []
+    seen_eoas: Set[str] = set()
+
+    def _push_eoa(candidate: str | None) -> None:
+        if not candidate:
+            return
+        value = candidate.strip()
+        if not value:
+            return
+        try:
+            chk = Web3.to_checksum_address(value)
+        except Exception:
+            chk = value
+        key = chk.lower()
+        if key not in seen_eoas:
+            seen_eoas.add(key)
+            display_eoas.append(chk)
+
+    for e in EOA_ADDRESSES:
+        _push_eoa(e)
+    for e in extra_eoas:
+        _push_eoa(e)
+    for e in eoa_map.keys():
+        _push_eoa(e)
+
+    if display_eoas:
+        if len(display_eoas) == 1:
+            html.append(f"👤 EOA Address: <code>{display_eoas[0]}</code>\n")
+        else:
+            html.append("👤 EOA Addresses:\n")
+            for addr in display_eoas:
+                html.append(f"• <code>{addr}</code>\n")
     else:
-        html.append("👤 EOA Address:\n")
-        for a in EOA_ADDRESSES:
-            html.append(f"• <code>{a}</code>\n")
+        html.append("👤 EOA Address: —\n")
+
     html.append(f"🔍 Peer IDs Monitored: <b>{len(peers)}</b>\n\n")
     html.append(f"📈 Total Votes: <b>{total_wins}</b>{_dmark(d_total_wins)}\n")
     html.append(f"💰 Total Rewards: <b>{total_rew}</b>{_dmark(d_total_rew)}\n")
