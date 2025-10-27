@@ -12,6 +12,7 @@ META="${META:-}"                 # e.g. "hetzner-fsn1,ram=16g"
 SCREEN_NAME="${SCREEN_NAME:-gensyn}"
 CHECK_PORT="${CHECK_PORT:-true}" # check local UI port 3000
 PORT="${PORT:-3000}"
+IP_CMD_V4="${IP_CMD_V4:-https://ipv4.icanhazip.com}"
 IP_CMD="${IP_CMD:-https://ifconfig.me}"
 GSWARM_EOA="${GSWARM_EOA:-}"
 GSWARM_PEER_IDS="${GSWARM_PEER_IDS:-}"  # comma-separated or JSON array
@@ -128,6 +129,15 @@ log_fresh() {
 }
 
 public_ip() {
+  if [[ -n "${IP_CMD_V4}" ]]; then
+    ip_v4=$(curl -fsS --max-time 2 "${IP_CMD_V4}" || true)
+    ip_v4=${ip_v4//$'\r'/}
+    ip_v4=${ip_v4//$'\n'/}
+    if [[ "$ip_v4" == *.* ]]; then
+      printf '%s' "$ip_v4"
+      return 0
+    fi
+  fi
   (curl -fsS --max-time 2 "${IP_CMD}" || true) | tr -d '\r\n'
 }
 
@@ -195,12 +205,22 @@ if ! have curl; then
   log "ERROR: curl not found"; exit 1
 fi
 
-curl -fsS -X POST "${SERVER_URL%/}/api/heartbeat" \
+if ! response=$(curl -sS -X POST "${SERVER_URL%/}/api/heartbeat" \
   -H "Authorization: Bearer ${SHARED_SECRET}" \
   -H "Content-Type: application/json" \
-  --data "${payload}" >/dev/null 2>&1 || {
-    log "WARN: heartbeat send failed"
-    exit 0
-  }
-
-log "beat node_id=${NODE_ID} status=${status} ip=${IP}${reason:+ reason=${reason}}"
+  -w 'HTTPSTATUS:%{http_code}' \
+  --data "${payload}"); then
+  log "WARN: heartbeat send failed (transport error)"
+  exit 0
+fi
+http_status=${response##*HTTPSTATUS:}
+body=${response%HTTPSTATUS:*}
+if [[ "${http_status}" =~ ^[0-9]+$ ]] && ((http_status >= 200 && http_status < 300)); then
+  log "beat node_id=${NODE_ID} status=${status} ip=${IP}${reason:+ reason=${reason}}"
+else
+  body_clean=${body//$'\r'/ }
+  body_clean=${body_clean//$'\n'/ }
+  body_clean=${body_clean//$'\t'/ }
+  body_clean=$(printf '%.180s' "$body_clean")
+  log "WARN: heartbeat send failed status=${http_status:-unknown}${body_clean:+ body=${body_clean}}"
+fi

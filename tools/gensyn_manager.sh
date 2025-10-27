@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 #
 # Gensyn Monitor helper.
 # Готовит сервер, ставит/обновляет/удаляет мониторинг и агента,
@@ -51,6 +51,18 @@ ask() {
   printf '%s' "${value:-}"
 }
 
+shell_quote() {
+  if have_cmd python3; then
+    python3 - "$1" <<'PY'
+import shlex, sys
+value = sys.argv[1] if len(sys.argv) > 1 else ""
+print(shlex.quote(value))
+PY
+  else
+    printf '%q' "$1"
+  fi
+}
+
 ensure_dos2unix() {
   if ! have_cmd dos2unix; then
     apt-get update -y >/dev/null 2>&1 || true
@@ -88,12 +100,12 @@ clone_or_update_repo() {
   local dest="$1"
   if [[ -d "$dest/.git" ]]; then
     echo "[*] updating repository $dest" >&2
-    git -C "$dest" fetch --all --prune
-    git -C "$dest" reset --hard origin/main
+    git -C "$dest" fetch --all --prune >/dev/null 2>&1
+    git -C "$dest" reset --hard origin/main >/dev/null 2>&1
   else
     echo "[*] cloning repository into $dest" >&2
-    mkdir -p "$(dirname "$dest")"
-    git clone "$REPO_URL" "$dest"
+    mkdir -p "$(dirname \"$dest\")"
+    git clone "$REPO_URL" "$dest" >/dev/null 2>&1
   fi
 }
 
@@ -101,7 +113,7 @@ clone_or_update_repo() {
 ensure_repo_for_agent() {
   local local_agents="$REPO_ROOT/agents/linux"
   if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
-    echo "$local_agents"     # stdout: только путь
+    echo "$local_agents"
     return 0
   fi
   if have_cmd git; then
@@ -109,13 +121,13 @@ ensure_repo_for_agent() {
     clone_or_update_repo "$REPO_DIR"
     local_agents="$REPO_DIR/agents/linux"
     if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
-      echo "$local_agents"   # stdout: только путь
+      echo "$local_agents"
       return 0
     fi
   fi
-  return 1                   # ничего не печатаем в stdout
+  echo ""
+  return 1
 }
-
 
 
 install_monitor() {
@@ -198,7 +210,7 @@ install_agent_from_raw() {
 
 install_agent() {
   need_root
-  local server secret node meta eoa peers dashurl
+  local server secret node meta eoa peers dashurl admin_token
   server="$(ask "URL мониторинга (например http://host:8080)")"
   secret="$(ask "SHARED_SECRET" "")"
   node="$(ask "NODE_ID" "$(hostname)-gensyn")"
@@ -206,13 +218,11 @@ install_agent() {
   eoa="$(ask "GSWARM_EOA (0x… — EOA адрес, опционально)" "")"
   peers="$(ask "GSWARM_PEER_IDS (через запятую, опционально)" "")"
   dashurl="$(ask "DASH_URL (адрес этой ноды в дашборде, опционально)" "")"
+  admin_token="$(ask "ADMIN_TOKEN (для /api/admin/delete, опционально)" "")"
 
   # 1) пытаемся взять файлы из локального/свежесклонированного репозитория
   local agents_dir
-    agents_dir="$(ensure_repo_for_agent 2>/dev/null | tail -n1 || true)"
-  if [[ -z "$agents_dir" || ! -f "$agents_dir/gensyn_agent.sh" ]]; then
-    agents_dir=""
-  fi
+  agents_dir="$(ensure_repo_for_agent || true)"
 
   if [[ -n "$agents_dir" ]]; then
     echo "[*] using agent files from: $agents_dir" >&2
@@ -225,16 +235,17 @@ install_agent() {
     install_agent_from_raw
   fi
 
-  # Конфиг агента
-  cat >"$AGENT_ENV" <<EOF
-SERVER_URL=${server}
-SHARED_SECRET=${secret}
-NODE_ID=${node}
-META=${meta}
-GSWARM_EOA=${eoa}
-GSWARM_PEER_IDS=${peers}
-DASH_URL=${dashurl}
-EOF
+  # Конфиг агента (с экранированием значений)
+  {
+    printf 'SERVER_URL=%s\n'        "$(shell_quote "$server")"
+    printf 'SHARED_SECRET=%s\n'     "$(shell_quote "$secret")"
+    printf 'NODE_ID=%s\n'           "$(shell_quote "$node")"
+    printf 'META=%s\n'              "$(shell_quote "$meta")"
+    printf 'GSWARM_EOA=%s\n'        "$(shell_quote "$eoa")"
+    printf 'GSWARM_PEER_IDS=%s\n'   "$(shell_quote "$peers")"
+    printf 'DASH_URL=%s\n'          "$(shell_quote "$dashurl")"
+    printf 'ADMIN_TOKEN=%s\n'       "$(shell_quote "$admin_token")"
+  } >"$AGENT_ENV"
   chmod 0644 "$AGENT_ENV"
   crlf_fix "$AGENT_ENV"
 
@@ -242,6 +253,16 @@ EOF
   systemctl enable --now "$(basename "$AGENT_TIMER")"
   echo "[+] Агент включён (таймер $(basename "$AGENT_TIMER"))"
   echo "[i] Конфиг агента: $AGENT_ENV"
+
+  if [[ -n "$server" ]]; then
+    local endpoint="${server%/}/api/gswarm/check?include_nodes=true&send=false"
+    echo "[*] Запрашиваю начальный сбор G-Swarm (${endpoint})…"
+    if curl -fsS -X POST "$endpoint" -d '' >/dev/null 2>&1; then
+      echo "[+] G-Swarm синхронизирован, данные появятся после перезагрузки UI."
+    else
+      echo "[!] Не удалось вызвать G-Swarm API (пропущено)." >&2
+    fi
+  fi
 }
 
 reinstall_agent() {
@@ -281,10 +302,34 @@ remove_monitor() {
 
 remove_agent() {
   need_root
+  local server_env="" node_env="" admin_env=""
+  if [[ -f "$AGENT_ENV" ]]; then
+    set +u
+    source "$AGENT_ENV"
+    server_env="${SERVER_URL:-}"
+    node_env="${NODE_ID:-}"
+    admin_env="${ADMIN_TOKEN:-}"
+    set -u
+  fi
+
   systemctl disable --now "$(basename "$AGENT_TIMER")" "$(basename "$AGENT_SERVICE")" || true
   rm -f "$AGENT_TIMER" "$AGENT_SERVICE"
   rm -f "$AGENT_BIN" "$AGENT_ENV"
   systemctl daemon-reload
+
+  if [[ -n "$server_env" && -n "$node_env" && -n "$admin_env" ]]; then
+    local endpoint="${server_env%/}/api/admin/delete"
+    echo "[*] Удаляю ноду из монитора (${endpoint})…"
+    if curl -fsS -X POST "$endpoint" \
+         -H "Authorization: Bearer ${admin_env}" \
+         -H "Content-Type: application/json" \
+         -d "{\"node_id\":\"${node_env}\"}" >/dev/null 2>&1; then
+      echo "[+] Нода ${node_env} удалена из монитора."
+    else
+      echo "[!] Не удалось вызвать /api/admin/delete (пропущено)." >&2
+    fi
+  fi
+
   echo "[+] Агент удалён"
 }
 

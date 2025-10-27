@@ -452,7 +452,15 @@ def admin_ok(h: Optional[str]) -> bool:
 async def heartbeat(req: Request, authorization: Optional[str] = Header(default=None)):
     if not auth_ok(authorization):
         raise HTTPException(401, "Unauthorized")
-    data = await req.json()
+    raw = await req.body()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        logger.warning("Heartbeat decode error: %s", exc)
+        raise HTTPException(400, "Invalid JSON encoding (expected UTF-8)")
+    except json.JSONDecodeError as exc:
+        logger.warning("Heartbeat JSON error: %s", exc)
+        raise HTTPException(400, "Malformed JSON payload")
     node_id = str(data.get("node_id", "")).strip()
     if not node_id:
         raise HTTPException(400, "node_id required")
