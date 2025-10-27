@@ -2,7 +2,8 @@
 #
 # Gensyn Monitor helper.
 # Готовит сервер, ставит/обновляет/удаляет мониторинг и агента,
-# показывает статус/логи. Поддерживает DASH_URL для нод.
+# показывает статус/логи. Поддерживает DASH_URL для нод и интерактивное
+# заполнение .env для дашборда.
 #
 set -euo pipefail
 
@@ -64,6 +65,7 @@ ask() {
   printf '%s' "${value:-}"
 }
 
+# Безопасное квотирование для .env (python-dotenv сам парсит без кавычек)
 shell_quote() {
   if have_cmd python3; then
     python3 - "$1" <<'PY'
@@ -83,8 +85,7 @@ import json, sys
 print(json.dumps(sys.argv[1] if len(sys.argv) > 1 else ""))
 PY
   else
-    local val="${1//\\/\\\\}"
-    val="${val//\"/\\\"}"
+    local val="${1//\\/\\\\}"; val="${val//\"/\\\"}"
     printf '"%s"' "$val"
   fi
 }
@@ -97,7 +98,6 @@ ensure_dos2unix() {
 }
 
 crlf_fix() {
-  # Безопасно прогоняем файлы через dos2unix (если они вдруг с CRLF)
   ensure_dos2unix
   for f in "$@"; do
     [[ -f "$f" ]] && dos2unix -q "$f" || true
@@ -122,11 +122,11 @@ maybe_open_firewall_port() {
     y|yes)
       if have_cmd ufw; then
         local ufw_status
-        ufw_status=$(ufw status 2>/dev/null | head -n1)
+        ufw_status=$(ufw status 2>/dev/null | head -n1 || true)
         if [[ "$ufw_status" =~ inactive ]]; then
           echo "[i] ufw установлен, но не активен — правило не добавлено."
         else
-          echo "[*] Добавляю правило ufw allow ${port}/tcp"
+          echo "[*] Добавляю правило: ufw allow ${port}/tcp"
           ufw allow "${port}/tcp" >/dev/null 2>&1 || ufw allow "${port}" >/dev/null 2>&1 || true
           ufw reload >/dev/null 2>&1 || true
         fi
@@ -139,9 +139,7 @@ maybe_open_firewall_port() {
         echo "[!] Поддерживаемый firewall не найден (ufw/firewalld). Добавьте правило вручную при необходимости."
       fi
       ;;
-    *)
-      echo "[i] Пропускаю настройку firewall."
-      ;;
+    *) echo "[i] Пропускаю настройку firewall." ;;
   esac
 }
 
@@ -161,11 +159,10 @@ clone_or_update_repo() {
     git -C "$dest" reset --hard origin/main >/dev/null 2>&1
   else
     echo "[*] cloning repository into $dest" >&2
-    mkdir -p "$(dirname \"$dest\")"
+    mkdir -p "$(dirname "$dest")"
     git clone "$REPO_URL" "$dest" >/dev/null 2>&1
   fi
 }
-
 
 ensure_repo_for_agent() {
   local local_agents="$REPO_ROOT/agents/linux"
@@ -186,6 +183,123 @@ ensure_repo_for_agent() {
   return 1
 }
 
+# ── Вспомогательные для интерактива .env ─────────────────────────────────────
+
+is_number() { [[ "$1" =~ ^[0-9]+$ ]] ; }
+
+json_validate() {
+  local s="$1"
+  if have_cmd jq; then
+    echo "$s" | jq -e . >/dev/null 2>&1
+    return $?
+  elif have_cmd python3; then
+    python3 - <<PY 2>/dev/null
+import json,sys
+try:
+    json.loads(sys.argv[1])
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+    return $?
+  else
+    # Нет валидатора — не блокируем установку
+    return 0
+  fi
+}
+
+write_kv() {
+  local k="$1" v="$2"
+  v=${v//$'\r'/}
+  v=${v//$'\n'/}
+  printf '%s=%s\n' "$k" "$v"
+}
+
+prompt_monitor_env() {
+  local repo="$1" env_file="$repo/.env"
+
+  echo "[*] Настраиваем переменные окружения (.env)"
+
+  # Значения по умолчанию через экспорт DEFAULT_*
+  local _bot="${DEFAULT_TELEGRAM_BOT_TOKEN:-}"
+  local _chat="${DEFAULT_TELEGRAM_CHAT_ID:-}"
+  local _shared="${DEFAULT_SHARED_SECRET:-}"
+  local _admin="${DEFAULT_ADMIN_TOKEN:-}"
+  local _title="${DEFAULT_SITE_TITLE:-Gensyn Nodes}"
+  local _thr="${DEFAULT_DOWN_THRESHOLD_SEC:-180}"
+  local _interval="${DEFAULT_GSWARM_REFRESH_INTERVAL:-600}"
+  local _autosend="${DEFAULT_GSWARM_AUTO_SEND:-0}"
+  local _nodemap="${DEFAULT_GSWARM_NODE_MAP:-}"
+
+  if [[ -f "$env_file" ]]; then
+    echo "[i] Найден существующий $env_file — пустые ответы сохранят текущее значение."
+    set +u
+    source "$env_file" 2>/dev/null || true
+    _bot="${_bot:-${TELEGRAM_BOT_TOKEN:-}}"
+    _chat="${_chat:-${TELEGRAM_CHAT_ID:-}}"
+    _shared="${_shared:-${SHARED_SECRET:-}}"
+    _admin="${_admin:-${ADMIN_TOKEN:-}}"
+    _title="${_title:-${SITE_TITLE:-Gensyn Nodes}}"
+    _thr="${_thr:-${DOWN_THRESHOLD_SEC:-180}}"
+    _interval="${_interval:-${GSWARM_REFRESH_INTERVAL:-600}}"
+    _autosend="${_autosend:-${GSWARM_AUTO_SEND:-0}}"
+    _nodemap="${_nodemap:-${GSWARM_NODE_MAP:-}}"
+    set -u
+  fi
+
+  TE_BOT="$(ask "TELEGRAM_BOT_TOKEN" "$_bot")"
+  TE_CHAT="$(ask "TELEGRAM_CHAT_ID" "$_chat")"
+  SHARED="$(ask "SHARED_SECRET" "$_shared")"
+  ADMIN="$(ask "ADMIN_TOKEN (опционально)" "$_admin")"
+  TITLE="$(ask "SITE_TITLE" "$_title")"
+
+  THR="$(ask "DOWN_THRESHOLD_SEC (в секундах)" "$_thr")"
+  while [[ -n "$THR" && ! $(is_number "$THR") ]]; do
+    echo "[!] Должно быть число." ; THR="$(ask "DOWN_THRESHOLD_SEC" "$_thr")"
+  done
+
+  INTV="$(ask "GSWARM_REFRESH_INTERVAL (секунды)" "$_interval")"
+  while [[ -n "$INTV" && ! $(is_number "$INTV") ]]; do
+    echo "[!] Должно быть число." ; INTV="$(ask "GSWARM_REFRESH_INTERVAL" "$_interval")"
+  done
+
+  AUTOSEND="$(ask "GSWARM_AUTO_SEND (0/1)" "$_autosend")"
+  [[ "$AUTOSEND" != "1" ]] && AUTOSEND="0"
+
+  echo
+  echo "[i] GSWARM_NODE_MAP — валидный JSON или пусто."
+  echo "    Пример: {\"node-1\":{\"eoa\":\"0x...\",\"peer_ids\":[\"Qm..\",\"Qm..\"]}}"
+  NODEMAP_INPUT="$(ask "GSWARM_NODE_MAP (JSON, можно пусто)" "$_nodemap")"
+  if [[ -n "$NODEMAP_INPUT" ]] && ! json_validate "$NODEMAP_INPUT"; then
+    echo "[!] Некорректный JSON. Оставляю пусто."
+    NODEMAP_INPUT=""
+  fi
+
+  if [[ -z "$TE_BOT" || -z "$TE_CHAT" || -z "$SHARED" ]]; then
+    echo "[!] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID/SHARED_SECRET обязательны — UI не запустится без них."
+  fi
+
+  local tmp="$env_file.tmp.$$"
+  {
+    write_kv "TELEGRAM_BOT_TOKEN" "$TE_BOT"
+    write_kv "TELEGRAM_CHAT_ID"   "$TE_CHAT"
+    write_kv "SHARED_SECRET"      "$SHARED"
+    write_kv "ADMIN_TOKEN"        "$ADMIN"
+    write_kv "SITE_TITLE"         "$TITLE"
+    write_kv "DOWN_THRESHOLD_SEC" "${THR:-180}"
+    write_kv "GSWARM_REFRESH_INTERVAL" "${INTV:-600}"
+    write_kv "GSWARM_AUTO_SEND"   "${AUTOSEND:-0}"
+    if [[ -n "$NODEMAP_INPUT" ]]; then
+      echo "GSWARM_NODE_MAP=$NODEMAP_INPUT"
+    else
+      echo "GSWARM_NODE_MAP="
+    fi
+  } >"$tmp"
+  mv -f "$tmp" "$env_file"
+  echo "[+] Файл .env обновлён: $env_file"
+}
+
+# ── Монитор (дашборд) ─────────────────────────────────────────────────────────
 
 install_monitor() {
   need_root
@@ -200,6 +314,10 @@ install_monitor() {
   cd "$repo"
   crlf_fix "$repo/.env" "$repo/example.env" || true
 
+  # 1) Сначала собираем .env (до старта сервиса)
+  prompt_monitor_env "$repo"
+
+  # 2) venv и зависимости
   echo "[*] Настраиваем venv и зависимости…"
   python3 -m venv .venv
   source .venv/bin/activate
@@ -207,11 +325,7 @@ install_monitor() {
   pip install -r requirements.txt
   deactivate
 
-  if [[ ! -f .env ]]; then
-    cp example.env .env
-    echo "[i] Сконфигурируйте .env (nano $repo/.env) перед стартом сервиса, если ещё не сделали."
-  fi
-
+  # 3) systemd unit
   cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Gensyn Monitor (Uvicorn)
@@ -222,7 +336,6 @@ After=network-online.target
 Type=simple
 WorkingDirectory=${repo}
 Environment=PYTHONUNBUFFERED=1
-# Пробрасываем .env в окружение процесса (в дополнение к python-dotenv)
 EnvironmentFile=-${repo}/.env
 ExecStart=${repo}/.venv/bin/uvicorn app:app --host 0.0.0.0 --port ${port}
 Restart=always
@@ -255,8 +368,9 @@ update_monitor() {
   echo "[+] Монитор обновлён и перезапущен."
 }
 
+# ── Агент ────────────────────────────────────────────────────────────────────
+
 install_agent_from_raw() {
-  # Фallback: тянем файлы агента напрямую из GitHub RAW
   echo "[*] Скачиваю файлы агента из GitHub (RAW)…"
   curl -fsSL "$RAW_BASE/agents/linux/gensyn_agent.sh"      -o "$AGENT_BIN"
   curl -fsSL "$RAW_BASE/agents/linux/gensyn-agent.service" -o "$AGENT_SERVICE"
@@ -279,7 +393,6 @@ install_agent() {
   dashurl="$(ask "DASH_URL (адрес этой ноды в дашборде, опционально)" "${DEFAULT_DASH_URL:-}")"
   admin_token="$(ask "ADMIN_TOKEN (для /api/admin/delete, опционально)" "${DEFAULT_ADMIN_TOKEN:-}")"
 
-  # 1) пытаемся взять файлы из локального/свежесклонированного репозитория
   local agents_dir
   agents_dir="$(ensure_repo_for_agent || true)"
 
@@ -290,11 +403,9 @@ install_agent() {
     install -m0644 "$agents_dir/gensyn-agent.timer"   "$AGENT_TIMER"
     crlf_fix "$AGENT_BIN" "$AGENT_SERVICE" "$AGENT_TIMER"
   else
-    # 2) нет репозитория — скачиваем RAW
     install_agent_from_raw
   fi
 
-  # Конфиг агента (с экранированием значений)
   {
     printf 'SERVER_URL=%s\n'        "$(shell_quote "$server")"
     printf 'SHARED_SECRET=%s\n'     "$(shell_quote "$secret")"
@@ -340,6 +451,7 @@ reinstall_agent() {
     prev_dash="${DASH_URL:-}"
     set -u
   fi
+
   systemctl disable --now "$(basename "$AGENT_TIMER")" "$(basename "$AGENT_SERVICE")" || true
 
   export DEFAULT_SERVER_URL="${prev_server}"
@@ -388,6 +500,8 @@ show_agent_env() {
     echo "[!] Файл $AGENT_ENV не найден."
   fi
 }
+
+# ── Служебные действия ───────────────────────────────────────────────────────
 
 monitor_status()   { systemctl status ${SERVICE_NAME}.service; }
 monitor_logs()     { journalctl -u ${SERVICE_NAME}.service -n 100 --no-pager; }
@@ -451,6 +565,8 @@ remove_agent() {
   echo "[+] Агент удалён"
 }
 
+# ── Меню ─────────────────────────────────────────────────────────────────────
+
 menu() {
   cat <<'EOF'
 ==== Gensyn Manager ====
@@ -493,6 +609,5 @@ main() {
     esac
   done
 }
-
 
 main "$@"
