@@ -193,7 +193,7 @@ json_validate() {
     echo "$s" | jq -e . >/dev/null 2>&1
     return $?
   elif have_cmd python3; then
-    python3 - <<'PY' 2>/dev/null
+    python3 - "$s" <<'PY' 2>/dev/null
 import json,sys
 try:
     json.loads(sys.argv[1])
@@ -207,6 +207,7 @@ PY
     return 0
   fi
 }
+
 
 write_kv() {
   local k="$1" v="$2"
@@ -391,9 +392,31 @@ install_agent() {
   dashurl="$(ask "DASH_URL (адрес этой ноды в дашборде, опционально)" "${DEFAULT_DASH_URL:-}")"
   admin_token="$(ask "ADMIN_TOKEN (для /api/admin/delete, опционально)" "${DEFAULT_ADMIN_TOKEN:-}")"
 
+  # --- Дополнительные параметры агента (healthcheck/регэкспы/логи)
+  local check_port port proc_fb require_p2pd allow_rx deny_rx log_file log_max_age
+  check_port="$(ask "CHECK_PORT (true/false)" "${DEFAULT_CHECK_PORT:-true}")"
+  port="$(ask "PORT (порт приложения для healthcheck)" "${DEFAULT_PORT:-3000}")"
+  while [[ -n "$port" ]] && ! [[ "$port" =~ ^[0-9]+$ ]]; do
+  echo "[!] PORT должен быть числом."
+  port="$(ask "PORT" "${DEFAULT_PORT:-3000}")"
+done
+  proc_fb="$(ask "PROC_FALLBACK_WITHOUT_SCREEN (true/false)" "${DEFAULT_PROC_FALLBACK_WITHOUT_SCREEN:-false}")"
+  require_p2pd="$(ask "REQUIRE_P2PD (screen|any|none)" "${DEFAULT_REQUIRE_P2PD:-screen}")"
+
+  echo "⚠️ Регэкспы вводите обычной строкой — скрипт корректно закавычит."
+  allow_rx="$(ask "ALLOW_REGEX" "${DEFAULT_ALLOW_REGEX:-python[[:space:]]*-m[[:space:]]*rgym_exp\\.runner\\.swarm_launcher}")"
+  deny_rx="$(ask "DENY_REGEX" "${DEFAULT_DENY_REGEX:-run_rl_swarm\\.sh|while[[:space:]]+true|sleep[[:space:]]+60|bash[[:space:]]-c.*while[[:space:]]+true}")"
+
+  log_file="$(ask "LOG_FILE (путь к логу)" "${DEFAULT_LOG_FILE:-/root/rl-swarm/logs/swarm_launcher.log}")"
+  log_max_age="$(ask "LOG_MAX_AGE (сек)" "${DEFAULT_LOG_MAX_AGE:-300}")"
+  while [[ -n "$log_max_age" ]] && ! [[ "$log_max_age" =~ ^[0-9]+$ ]]; do
+  echo "[!] LOG_MAX_AGE должен быть числом."
+  log_max_age="$(ask "LOG_MAX_AGE" "${DEFAULT_LOG_MAX_AGE:-300}")"
+done
+
+  # 1) файлы агента
   local agents_dir
   agents_dir="$(ensure_repo_for_agent || true)"
-
   if [[ -n "$agents_dir" ]]; then
     echo "[*] using agent files from: $agents_dir" >&2
     install -m0755 "$agents_dir/gensyn_agent.sh" "$AGENT_BIN"
@@ -404,6 +427,7 @@ install_agent() {
     install_agent_from_raw
   fi
 
+  # 2) конфиг агента
   {
     printf 'SERVER_URL=%s\n'        "$(shell_quote "$server")"
     printf 'SHARED_SECRET=%s\n'     "$(shell_quote "$secret")"
@@ -413,6 +437,15 @@ install_agent() {
     printf 'GSWARM_PEER_IDS=%s\n'   "$(shell_quote "$peers")"
     printf 'DASH_URL=%s\n'          "$(shell_quote "$dashurl")"
     printf 'ADMIN_TOKEN=%s\n'       "$(shell_quote "$admin_token")"
+
+    printf 'CHECK_PORT=%s\n'                       "$(shell_quote "$check_port")"
+    printf 'PORT=%s\n'                             "$(shell_quote "$port")"
+    printf 'PROC_FALLBACK_WITHOUT_SCREEN=%s\n'     "$(shell_quote "$proc_fb")"
+    printf 'REQUIRE_P2PD=%s\n'                     "$(shell_quote "$require_p2pd")"
+    printf 'ALLOW_REGEX=%s\n'                      "$(shell_quote "$allow_rx")"
+    printf 'DENY_REGEX=%s\n'                       "$(shell_quote "$deny_rx")"
+    printf 'LOG_FILE=%s\n'                         "$(shell_quote "$log_file")"
+    printf 'LOG_MAX_AGE=%s\n'                      "$(shell_quote "$log_max_age")"
   } >"$AGENT_ENV"
   chmod 0644 "$AGENT_ENV"
   crlf_fix "$AGENT_ENV"
@@ -436,6 +469,10 @@ install_agent() {
 reinstall_agent() {
   need_root
   local prev_server="" prev_node="" prev_admin="" prev_secret="" prev_meta="" prev_eoa="" prev_peers="" prev_dash=""
+  # новые поля
+  local prev_check_port="" prev_port="" prev_proc_fb="" prev_require_p2pd=""
+  local prev_allow_rx="" prev_deny_rx="" prev_log_file="" prev_log_max_age=""
+
   if [[ -f "$AGENT_ENV" ]]; then
     set +u
     source "$AGENT_ENV"
@@ -447,6 +484,15 @@ reinstall_agent() {
     prev_eoa="${GSWARM_EOA:-}"
     prev_peers="${GSWARM_PEER_IDS:-}"
     prev_dash="${DASH_URL:-}"
+
+    prev_check_port="${CHECK_PORT:-}"
+    prev_port="${PORT:-}"
+    prev_proc_fb="${PROC_FALLBACK_WITHOUT_SCREEN:-}"
+    prev_require_p2pd="${REQUIRE_P2PD:-}"
+    prev_allow_rx="${ALLOW_REGEX:-}"
+    prev_deny_rx="${DENY_REGEX:-}"
+    prev_log_file="${LOG_FILE:-}"
+    prev_log_max_age="${LOG_MAX_AGE:-}"
     set -u
   fi
 
@@ -461,10 +507,22 @@ reinstall_agent() {
   export DEFAULT_DASH_URL="${prev_dash}"
   export DEFAULT_ADMIN_TOKEN="${prev_admin}"
 
+  export DEFAULT_CHECK_PORT="${prev_check_port}"
+  export DEFAULT_PORT="${prev_port}"
+  export DEFAULT_PROC_FALLBACK_WITHOUT_SCREEN="${prev_proc_fb}"
+  export DEFAULT_REQUIRE_P2PD="${prev_require_p2pd}"
+  export DEFAULT_ALLOW_REGEX="${prev_allow_rx}"
+  export DEFAULT_DENY_REGEX="${prev_deny_rx}"
+  export DEFAULT_LOG_FILE="${prev_log_file}"
+  export DEFAULT_LOG_MAX_AGE="${prev_log_max_age}"
+
   install_agent
 
   unset DEFAULT_SERVER_URL DEFAULT_SHARED_SECRET DEFAULT_NODE_ID DEFAULT_META \
-        DEFAULT_GSWARM_EOA DEFAULT_GSWARM_PEER_IDS DEFAULT_DASH_URL DEFAULT_ADMIN_TOKEN
+        DEFAULT_GSWARM_EOA DEFAULT_GSWARM_PEER_IDS DEFAULT_DASH_URL DEFAULT_ADMIN_TOKEN \
+        DEFAULT_CHECK_PORT DEFAULT_PORT DEFAULT_PROC_FALLBACK_WITHOUT_SCREEN \
+        DEFAULT_REQUIRE_P2PD DEFAULT_ALLOW_REGEX DEFAULT_DENY_REGEX \
+        DEFAULT_LOG_FILE DEFAULT_LOG_MAX_AGE
 
   local new_node="" new_server=""
   if [[ -f "$AGENT_ENV" ]]; then
