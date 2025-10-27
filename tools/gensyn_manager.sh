@@ -87,37 +87,36 @@ prepare_device() {
 clone_or_update_repo() {
   local dest="$1"
   if [[ -d "$dest/.git" ]]; then
-    echo "[*] Обновляем репозиторий $dest"
+    echo "[*] updating repository $dest" >&2
     git -C "$dest" fetch --all --prune
     git -C "$dest" reset --hard origin/main
   else
-    echo "[*] Клонируем репозиторий в $dest"
+    echo "[*] cloning repository into $dest" >&2
     mkdir -p "$(dirname "$dest")"
     git clone "$REPO_URL" "$dest"
   fi
 }
 
+
 ensure_repo_for_agent() {
-  # Гарантирует наличие репозитория для установки агента.
-  # Если локально нет, пытается клонировать REPO_DIR.
-  # Возвращает echo путь к каталогу с agents/linux или пустую строку при неудаче.
   local local_agents="$REPO_ROOT/agents/linux"
   if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
-    echo "$local_agents"
+    echo "$local_agents"     # stdout: только путь
     return 0
   fi
   if have_cmd git; then
-    echo "[*] Локальный репозиторий не найден. Клонирую в $REPO_DIR…"
+    echo "[*] local agent files not found, cloning into $REPO_DIR" >&2
     clone_or_update_repo "$REPO_DIR"
     local_agents="$REPO_DIR/agents/linux"
     if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
-      echo "$local_agents"
+      echo "$local_agents"   # stdout: только путь
       return 0
     fi
   fi
-  echo ""
-  return 1
+  return 1                   # ничего не печатаем в stdout
 }
+
+
 
 install_monitor() {
   need_root
@@ -210,10 +209,13 @@ install_agent() {
 
   # 1) пытаемся взять файлы из локального/свежесклонированного репозитория
   local agents_dir
-  agents_dir="$(ensure_repo_for_agent || true)"
+    agents_dir="$(ensure_repo_for_agent 2>/dev/null | tail -n1 || true)"
+  if [[ -z "$agents_dir" || ! -f "$agents_dir/gensyn_agent.sh" ]]; then
+    agents_dir=""
+  fi
 
   if [[ -n "$agents_dir" ]]; then
-    echo "[*] Использую файлы агента из: $agents_dir"
+    echo "[*] using agent files from: $agents_dir" >&2
     install -m0755 "$agents_dir/gensyn_agent.sh" "$AGENT_BIN"
     install -m0644 "$agents_dir/gensyn-agent.service" "$AGENT_SERVICE"
     install -m0644 "$agents_dir/gensyn-agent.timer"   "$AGENT_TIMER"
