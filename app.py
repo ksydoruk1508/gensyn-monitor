@@ -121,7 +121,7 @@ ENV_GSWARM_NODE_MAP = _load_env_node_map(GSWARM_NODE_MAP_RAW)
 if not (BOT_TOKEN and CHAT_ID and SHARED):
     raise RuntimeError("Set TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SHARED_SECRET in .env")
 
-DB = "monitor.db"
+DB = os.getenv("DB_PATH", "/opt/gensyn-monitor/monitor.db")
 
 # ── Приложение ────────────────────────────────────────────────────────────────
 app = FastAPI()
