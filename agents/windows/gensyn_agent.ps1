@@ -5,13 +5,16 @@ Param()
 
 # --- Config --------------------------------------------------------------------
 # Set these as Environment Variables or directly edit below:
-$SERVER_URL    = $env:SERVER_URL    # e.g. http://MONITOR_HOST:8080
-$SHARED_SECRET = $env:SHARED_SECRET # must match server .env
-$NODE_ID       = $env:NODE_ID       # default -> "<COMPUTERNAME>-gensyn"
-$META          = $env:META          # e.g. "dc=home-lab,ram=32g"
-$CHECK_PORT    = $env:CHECK_PORT    # "true"/"false" (default true)
-$PORT          = $env:PORT          # default 3000
-$IP_CMD        = $env:IP_CMD        # e.g. https://ifconfig.me
+$SERVER_URL     = $env:SERVER_URL     # e.g. http://MONITOR_HOST:8080
+$SHARED_SECRET  = $env:SHARED_SECRET  # must match server .env
+$NODE_ID        = $env:NODE_ID        # default -> "<COMPUTERNAME>-gensyn"
+$META           = $env:META           # e.g. "dc=home-lab,ram=32g"
+$CHECK_PORT     = $env:CHECK_PORT     # "true"/"false" (default true)
+$PORT           = $env:PORT           # default 3000
+$IP_CMD         = $env:IP_CMD         # e.g. https://ifconfig.me
+$GSWARM_EOA     = $env:GSWARM_EOA
+$GSWARM_PEER_IDS= $env:GSWARM_PEER_IDS
+$GSWARM_TGID    = $env:GSWARM_TGID
 
 if ([string]::IsNullOrWhiteSpace($NODE_ID))    { $NODE_ID = "$($env:COMPUTERNAME)-gensyn" }
 if ([string]::IsNullOrWhiteSpace($CHECK_PORT)) { $CHECK_PORT = "true" }
@@ -49,17 +52,27 @@ $healthy = (Test-ProcOk) -and (Test-PortOk)
 $status  = if ($healthy) { "UP" } else { "DOWN" }
 $ip      = Get-PublicIP
 
-$payload = @{
+$payload = [ordered]@{
   node_id = $NODE_ID
   ip      = $ip
   meta    = $META
   status  = $status
-} | ConvertTo-Json -Compress
+}
+if (-not [string]::IsNullOrWhiteSpace($GSWARM_EOA)) {
+  $payload["gswarm_eoa"] = $GSWARM_EOA.Trim()
+}
+if (-not [string]::IsNullOrWhiteSpace($GSWARM_PEER_IDS)) {
+  $payload["gswarm_peer_ids"] = $GSWARM_PEER_IDS.Trim()
+}
+if (-not [string]::IsNullOrWhiteSpace($GSWARM_TGID)) {
+  $payload["gswarm_tgid"] = $GSWARM_TGID.Trim()
+}
+$payloadJson = $payload | ConvertTo-Json -Compress
 
 try {
   Invoke-WebRequest -UseBasicParsing -Method Post -Uri ("{0}/api/heartbeat" -f $SERVER_URL.TrimEnd('/')) `
     -Headers @{ Authorization = "Bearer $SHARED_SECRET"; "Content-Type" = "application/json" } `
-    -Body $payload | Out-Null
+    -Body $payloadJson | Out-Null
 } catch {
   # swallow to avoid Scheduler spam; could log to Event Log if needed
 }

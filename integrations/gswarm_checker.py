@@ -1,8 +1,8 @@
 # integrations/gswarm_checker.py
-import os, json, datetime, urllib.parse, urllib.request, urllib.error
+import os, json, datetime, time, urllib.parse, urllib.request, urllib.error
 from pathlib import Path
-from urllib.error import HTTPError
-from typing import List, Dict, Any, Tuple, Set
+from urllib.error import HTTPError, URLError
+from typing import List, Dict, Any, Tuple, Set, Iterator
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -59,6 +59,10 @@ def _truthy(val: str | None, default: bool = False) -> bool:
 SHOW_PROBLEMS = _truthy(_SHOW_PROBLEMS_RAW, False)
 SHOW_SRC_MODE = _SHOW_SRC_MODE_RAW if _SHOW_SRC_MODE_RAW in {"auto", "always", "never"} else "auto"
 
+def _chunks(seq: List[str], size: int) -> Iterator[List[str]]:
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
 def _dmark(delta: int | None) -> str:
     if delta is None: return ""
     return f" 📈 (+{delta})" if delta > 0 else (f" 📉 ({delta})" if delta < 0 else " ➡️ (0)")
@@ -79,37 +83,85 @@ def _send_html(html: str) -> bytes:
     with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=15) as r:
         return r.read()
 
-def _fetch_offchain(peer_ids: List[str]) -> Tuple[Dict[str, Dict[str, int]], Dict[str, int]]:
-    """{peerId:{wins,rewards,rank}}, totals — только если указан GSWARM_TGID и бэкенд вернул данные."""
-    if not GSWARM_TGID or not peer_ids:
-        return {}, {"wins":0,"rewards":0}
-    req = urllib.request.Request(
-        "https://gswarm.dev/api/user/data",
-        data=json.dumps({"peerIds": peer_ids}).encode(),
-        headers={"Content-Type":"application/json","X-Telegram-ID":GSWARM_TGID},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            payload = json.loads(r.read().decode())
-    except Exception:
-        return {}, {"wins":0,"rewards":0}
+def _fetch_offchain(peer_ids: List[str], tgid: str | None = None) -> Tuple[Dict[str, Dict[str, int]], Dict[str, int]]:
+    """Стабильный сбор оффчейна: батчи, ретраи, частичные успехи."""
+    per: Dict[str, Dict[str, int]] = {}
+    totals = {"wins": 0, "rewards": 0}
+    if not peer_ids:
+        return per, totals
 
-    per, totals = {}, {"wins":0,"rewards":0}
-    for item in payload.get("ranks", []):
-        pid = item.get("peerId")
-        if not pid: continue
-        wins = int(item.get("totalWins") or 0)
-        rew  = int(item.get("totalRewards") or 0)
-        rk   = int(item.get("rank") or 0)
-        per[pid] = {"wins": wins, "rewards": rew, "rank": rk}
-        totals["wins"]    += wins
-        totals["rewards"] += rew
+    normalized: List[str] = []
+    seen = set()
+    for raw in peer_ids:
+        pid = str(raw).strip() if raw is not None else ""
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        normalized.append(pid)
+    if not normalized:
+        return per, totals
+
+    target_tgid = tgid
+    if target_tgid is not None and not isinstance(target_tgid, str):
+        target_tgid = str(target_tgid)
+    if target_tgid:
+        target_tgid = target_tgid.strip()
+    if not target_tgid:
+        target_tgid = GSWARM_TGID
+    if not target_tgid:
+        return per, totals
+
+    BATCH_SIZE = 100
+    RETRIES = 2  # доп. повторы помимо основной попытки
+    BACKOFF = 0.4
+
+    for chunk in _chunks(normalized, BATCH_SIZE):
+        attempt = 0
+        while True:
+            req = urllib.request.Request(
+                "https://gswarm.dev/api/user/data",
+                data=json.dumps({"peerIds": chunk}).encode(),
+                headers={"Content-Type": "application/json", "X-Telegram-ID": target_tgid},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    payload = json.loads(r.read().decode())
+                for item in payload.get("ranks", []) or []:
+                    pid = item.get("peerId")
+                    if not pid:
+                        continue
+                    wins = int(item.get("totalWins") or 0)
+                    rewards = int(item.get("totalRewards") or 0)
+                    rank = int(item.get("rank") or 0)
+                    entry = per.setdefault(pid, {"wins": 0, "rewards": 0, "rank": 0})
+                    entry["wins"] += wins
+                    entry["rewards"] += rewards
+                    if not entry["rank"] and rank:
+                        entry["rank"] = rank
+                    totals["wins"] += wins
+                    totals["rewards"] += rewards
+                break
+            except HTTPError as exc:
+                code = getattr(exc, "code", None)
+                if code in {429, 500, 502, 503, 504} and attempt < RETRIES:
+                    time.sleep(BACKOFF * (attempt + 1))
+                    attempt += 1
+                    continue
+                break
+            except (URLError, TimeoutError, json.JSONDecodeError, ValueError):
+                if attempt < RETRIES:
+                    time.sleep(BACKOFF * (attempt + 1))
+                    attempt += 1
+                    continue
+                break
+
     return per, totals
 
 def run_once(
     send_telegram: bool = False,
     extra_peer_ids: List[str] | None = None,
     extra_eoas: List[str] | None = None,
+    offchain_peer_map: Dict[str | None, List[str]] | None = None,
 ) -> Dict[str, Any]:
     """Основной запуск: собирает peers (включая переданные явно) → on-chain → off-chain → HTML.
     Возвращает словарь с данными и HTML. При send_telegram=True отправляет в Telegram."""
@@ -141,6 +193,39 @@ def run_once(
         eoa_map[eoa_key] = list(dict.fromkeys(plist))
     if extra_peer_ids:
         peers = list(dict.fromkeys([*peers, *extra_peer_ids]))
+    peer_groups: Dict[str | None, List[str]] = {}
+    if offchain_peer_map:
+        grouped_set: Set[str] = set()
+        for raw_key, values in offchain_peer_map.items():
+            local_seen: Set[str] = set()
+            deduped: List[str] = []
+            for pid in values or []:
+                pid_clean = (pid or "").strip()
+                if not pid_clean or pid_clean in local_seen:
+                    continue
+                local_seen.add(pid_clean)
+                deduped.append(pid_clean)
+            if not deduped:
+                continue
+            key_norm: str | None
+            if raw_key is None or (isinstance(raw_key, str) and not raw_key.strip()):
+                key_norm = None
+            else:
+                key_norm = str(raw_key).strip()
+                if not key_norm:
+                    key_norm = None
+            peer_groups[key_norm] = deduped
+            grouped_set.update(deduped)
+        if grouped_set:
+            peers = list(dict.fromkeys([*peers, *grouped_set]))
+        if peers:
+            remaining = [pid for pid in peers if pid not in grouped_set]
+            if remaining:
+                base_default = peer_groups.get(None, [])
+                merged_default = list(dict.fromkeys([*base_default, *remaining]))
+                peer_groups[None] = merged_default
+    else:
+        peer_groups = {}
 
     # on-chain wins/rewards (rewards может отсутствовать)
     on_wins = {pid: 0 for pid in peers}
@@ -159,8 +244,20 @@ def run_once(
                 pass
 
     # off-chain
-    off_per, _off_tot = _fetch_offchain(peers)
-    is_verified = bool(off_per)
+    off_per: Dict[str, Dict[str, Any]] = {}
+    off_totals = {"wins": 0, "rewards": 0}
+    if peer_groups:
+        is_verified = False
+        for tgid_key, ids in peer_groups.items():
+            chunk_per, chunk_totals = _fetch_offchain(ids, tgid_key)
+            if chunk_per:
+                is_verified = True
+            off_per.update(chunk_per)
+            off_totals["wins"] += int(chunk_totals.get("wins", 0) or 0)
+            off_totals["rewards"] += int(chunk_totals.get("rewards", 0) or 0)
+    else:
+        off_per, off_totals = _fetch_offchain(peers)
+        is_verified = bool(off_per)
 
     # финальные значения
     per_peer: Dict[str, Dict[str, Any]] = {}
@@ -310,6 +407,8 @@ def run_once(
         "per_peer": per_peer,
         "totals": {"wins": total_wins, "rewards": total_rew, "dwins": d_total_wins, "drewards": d_total_rew},
         "verified": is_verified,
+        "offchain_totals": off_totals,
+        "offchain_groups": {key: ids for key, ids in peer_groups.items()},
         "html": html_text,
         "sent": sent,
         "send_error": send_error,

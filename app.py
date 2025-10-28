@@ -100,9 +100,20 @@ def _load_env_node_map(raw: str) -> Dict[str, Dict[str, Any]]:
             continue
         eoa = (cfg.get("eoa") or "").strip() or None
         peers = parse_peer_ids(cfg.get("peer_ids"))
-        if not eoa and not peers:
+        tgid_raw = cfg.get("tgid")
+        if tgid_raw is None:
+            tgid_raw = cfg.get("telegram_id")
+        tgid = (str(tgid_raw).strip() or None) if tgid_raw is not None else None
+        if not eoa and not peers and not tgid:
             continue
-        out[node_id] = {"eoa": eoa, "peer_ids": peers}
+        entry: Dict[str, Any] = {}
+        if eoa:
+            entry["eoa"] = eoa
+        if peers:
+            entry["peer_ids"] = peers
+        if tgid:
+            entry["tgid"] = tgid
+        out[node_id] = entry
     return out
 
 ENV_GSWARM_NODE_MAP = _load_env_node_map(GSWARM_NODE_MAP_RAW)
@@ -135,9 +146,11 @@ async def init_db():
             pass
         for ddl in (
             "ALTER TABLE nodes ADD COLUMN gswarm_eoa TEXT",
+            "ALTER TABLE nodes ADD COLUMN gswarm_tgid TEXT",
             "ALTER TABLE nodes ADD COLUMN gswarm_peer_ids TEXT",
             "ALTER TABLE nodes ADD COLUMN gswarm_stats TEXT",
             "ALTER TABLE nodes ADD COLUMN gswarm_updated INTEGER",
+            "ALTER TABLE nodes ADD COLUMN gswarm_alert INTEGER DEFAULT 1",
         ):
             try:
                 await db.execute(ddl)
@@ -168,28 +181,31 @@ async def upsert(
     meta: Optional[str],
     reported: str,
     gswarm_eoa: Optional[str],
-    gswarm_peer_ids: Optional[List[str]]
+    gswarm_peer_ids: Optional[List[str]],
+    gswarm_tgid: Optional[str]
 ):
     """
     reported — статус, присланный агентом: 'UP' | 'DOWN' (валидируем в handler’е).
     """
     now = int(time.time())
     gswarm_eoa = (gswarm_eoa or "").strip() or None
+    gswarm_tgid = (gswarm_tgid or "").strip() or None
     peers_blob = peers_to_store(gswarm_peer_ids)
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT INTO nodes(
-                node_id,ip,last_seen,last_state,last_computed,meta,last_reported,gswarm_eoa,gswarm_peer_ids
+                node_id,ip,last_seen,last_state,last_computed,meta,last_reported,gswarm_eoa,gswarm_tgid,gswarm_peer_ids
             )
-            VALUES(?, ?, ?, 'DOWN','UP', ?, ?, ?, ?)
+            VALUES(?, ?, ?, 'DOWN','UP', ?, ?, ?, ?, ?)
             ON CONFLICT(node_id) DO UPDATE
               SET ip=excluded.ip,
                   last_seen=excluded.last_seen,
                   meta=excluded.meta,
                   last_reported=excluded.last_reported,
                   gswarm_eoa=excluded.gswarm_eoa,
+                  gswarm_tgid=excluded.gswarm_tgid,
                   gswarm_peer_ids=excluded.gswarm_peer_ids
-        """, (node_id, ip, now, meta, reported, gswarm_eoa, peers_blob))
+        """, (node_id, ip, now, meta, reported, gswarm_eoa, gswarm_tgid, peers_blob))
         await db.commit()
 
 async def list_nodes():
@@ -220,20 +236,38 @@ async def list_nodes():
             env_cfg = ENV_GSWARM_NODE_MAP.get(r["node_id"])
             env_eoa = env_cfg.get("eoa") if env_cfg else None
             env_peers = env_cfg.get("peer_ids") if env_cfg else []
+            env_tgid = env_cfg.get("tgid") if env_cfg else None
+            alert_raw = 1
+            if "gswarm_alert" in r.keys():
+                try:
+                    alert_raw = int(r["gswarm_alert"])
+                except Exception:
+                    alert_raw = 1
+            alert_enabled = bool(alert_raw if alert_raw is not None else 1)
 
             # итоговые значения для UI
             stats_eoa = gswarm_stats.get("eoa") if isinstance(gswarm_stats, dict) else None
             eoa_value = r["gswarm_eoa"] or env_eoa or stats_eoa
             peers_value = peer_ids or env_peers
+            db_tgid = None
+            if "gswarm_tgid" in r.keys():
+                raw_tgid = r["gswarm_tgid"]
+                if isinstance(raw_tgid, str):
+                    db_tgid = raw_tgid.strip() or None
+                elif raw_tgid is not None:
+                    db_tgid = str(raw_tgid).strip() or None
+            tgid_value = db_tgid or env_tgid
 
             updated_val = r["gswarm_updated"] if "gswarm_updated" in r.keys() else None
             gswarm_block = None
-            if eoa_value or peers_value or gswarm_stats:
+            if eoa_value or peers_value or gswarm_stats or tgid_value or alert_enabled:
                 gswarm_block = {
                     "eoa": eoa_value,
                     "peer_ids": peers_value,
                     "stats": gswarm_stats,
-                    "updated": updated_val
+                    "updated": updated_val,
+                    "tgid": tgid_value,
+                    "alert": alert_enabled
                 }
 
             out.append({
@@ -245,7 +279,8 @@ async def list_nodes():
                 "meta": r["meta"],
                 "age_sec": max(0, now - int(r["last_seen"])),
                 "reported": reported,
-                "gswarm": gswarm_block
+                "gswarm": gswarm_block,
+                "gswarm_alert": alert_enabled
             })
         return out
 
@@ -283,7 +318,15 @@ async def _gswarm_sources() -> tuple[List[str], Dict[str, Dict[str, Any]]]:
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
-            "SELECT node_id, gswarm_eoa, gswarm_peer_ids FROM nodes"
+            """
+            SELECT node_id,
+                   gswarm_eoa,
+                   gswarm_tgid,
+                   gswarm_peer_ids,
+                   gswarm_alert,
+                   gswarm_stats
+            FROM nodes
+            """
         )
     eoas: List[str] = []
     node_configs: Dict[str, Dict[str, Any]] = {}
@@ -292,6 +335,20 @@ async def _gswarm_sources() -> tuple[List[str], Dict[str, Dict[str, Any]]]:
         eoa_raw = (r["gswarm_eoa"] or "").strip()
         eoa_norm = _normalize_eoa(eoa_raw)
         peers = parse_peer_ids(r["gswarm_peer_ids"])
+        if not peers and r["gswarm_stats"]:
+            try:
+                stats_blob = json.loads(r["gswarm_stats"])
+                if isinstance(stats_blob, dict):
+                    per_peer_stats = stats_blob.get("per_peer") or {}
+                    if isinstance(per_peer_stats, dict):
+                        peers = _dedup([
+                            str(pid).strip()
+                            for pid in per_peer_stats.keys()
+                            if str(pid).strip()
+                        ])
+            except Exception:
+                peers = peers or []
+        tgid_raw = (r["gswarm_tgid"] or "").strip() if "gswarm_tgid" in r.keys() else ""
         cfg: Dict[str, Any] = {}
         if eoa_raw:
             eoas.append(eoa_raw)
@@ -300,6 +357,15 @@ async def _gswarm_sources() -> tuple[List[str], Dict[str, Dict[str, Any]]]:
             cfg["eoa_norm"] = eoa_norm
         if peers:
             cfg["peer_ids"] = peers
+        if tgid_raw:
+            cfg["tgid"] = tgid_raw
+        alert_flag = True
+        if "gswarm_alert" in r.keys():
+            try:
+                alert_flag = bool(int(r["gswarm_alert"]))
+            except Exception:
+                alert_flag = True
+        cfg["alert"] = alert_flag
         if cfg:
             node_configs[r["node_id"]] = cfg
     for node_id, cfg in ENV_GSWARM_NODE_MAP.items():
@@ -310,6 +376,10 @@ async def _gswarm_sources() -> tuple[List[str], Dict[str, Dict[str, Any]]]:
             stored["eoa"] = cfg["eoa"]
             stored["eoa_norm"] = _normalize_eoa(cfg["eoa"])
             eoas.append(cfg["eoa"])
+        if cfg.get("tgid") and not stored.get("tgid"):
+            stored["tgid"] = cfg["tgid"]
+        if stored.get("alert") is None and cfg.get("alert") is not None:
+            stored["alert"] = cfg.get("alert")
         if cfg.get("peer_ids"):
             if stored.get("peer_ids"):
                 stored["peer_ids"] = _dedup([*stored["peer_ids"], *cfg["peer_ids"]])
@@ -375,8 +445,42 @@ def _aggregate_nodes(per_peer: Dict[str, Dict[str, Any]], node_configs: Dict[str
         if stats:
             if cfg.get("eoa"):
                 stats["eoa"] = cfg.get("eoa")
+            if cfg.get("tgid"):
+                stats["tgid"] = cfg.get("tgid")
+            if cfg.get("alert") is not None:
+                stats["alert"] = bool(cfg.get("alert"))
             aggregated[node_id] = stats
     return aggregated
+
+def _collect_peer_groups(node_configs: Dict[str, Dict[str, Any]]) -> Dict[str | None, List[str]]:
+    groups: Dict[str | None, List[str]] = {}
+    for cfg in node_configs.values():
+        peers = cfg.get("peer_ids") or []
+        if not peers:
+            continue
+        raw_key = cfg.get("tgid")
+        key: str | None
+        if raw_key is None:
+            key = None
+        else:
+            key = str(raw_key).strip()
+            if not key:
+                key = None
+        bucket = groups.setdefault(key, [])
+        bucket.extend(peers)
+    deduped: Dict[str | None, List[str]] = {}
+    for key, values in groups.items():
+        seen = set()
+        items: List[str] = []
+        for pid in values:
+            pid_clean = (pid or "").strip()
+            if not pid_clean or pid_clean in seen:
+                continue
+            seen.add(pid_clean)
+            items.append(pid_clean)
+        if items:
+            deduped[key] = items
+    return deduped
 
 async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str, Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], int]:
     if not node_configs:
@@ -396,16 +500,20 @@ async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str,
             if payload_dict and cfg.get("eoa") and not payload_dict.get("eoa"):
                 payload_dict = dict(payload_dict)
                 payload_dict["eoa"] = cfg["eoa"]
+            if payload_dict and cfg.get("tgid") and not payload_dict.get("tgid"):
+                payload_dict = dict(payload_dict)
+                payload_dict["tgid"] = cfg["tgid"]
             payload = json.dumps(payload_dict, ensure_ascii=False) if payload_dict else None
             updated_ts = now_ts if stats else None
             peers_blob = peers_to_store(cfg.get("peer_ids"))
+            tgid_value = cfg.get("tgid") or None
             await db.execute(
                 """
                 UPDATE nodes
-                SET gswarm_stats=?, gswarm_updated=?, gswarm_eoa=?, gswarm_peer_ids=?
+                SET gswarm_stats=?, gswarm_updated=?, gswarm_eoa=?, gswarm_tgid=?, gswarm_peer_ids=?
                 WHERE node_id=?
                 """,
-                (payload, updated_ts, (cfg.get("eoa") or None), peers_blob, node_id),
+                (payload, updated_ts, (cfg.get("eoa") or None), tgid_value, peers_blob, node_id),
             )
             if stats:
                 updated_count += 1
@@ -416,6 +524,8 @@ async def refresh_gswarm_stats():
     logger.info("[GSWARM] refresh: collecting sources…")
     eoas, node_configs = await _gswarm_sources()
     extra_peer_ids = sorted({pid for cfg in node_configs.values() for pid in cfg.get("peer_ids", [])})
+    peer_groups = _collect_peer_groups(node_configs) if node_configs else {}
+    any_alert = any(cfg.get("alert", True) for cfg in node_configs.values()) if node_configs else False
     if not node_configs and not eoas:
         logger.info("[GSWARM] refresh: nothing to do (no node configs / EOAs)")
         return
@@ -424,9 +534,10 @@ async def refresh_gswarm_stats():
         result = await loop.run_in_executor(
             None,
             lambda: run_once(
-                send_telegram=GSWARM_AUTO_SEND,
+                send_telegram=GSWARM_AUTO_SEND and any_alert,
                 extra_peer_ids=extra_peer_ids,
                 extra_eoas=eoas,
+                offchain_peer_map=peer_groups,
             ),
         )
     except Exception as exc:
@@ -496,8 +607,17 @@ async def heartbeat(req: Request, authorization: Optional[str] = Header(default=
     if peer_input is None and gswarm_envelope:
         peer_input = gswarm_envelope.get("peer_ids")
     gswarm_peer_ids = parse_peer_ids(peer_input)
+    tgid_input = data.get("gswarm_tgid")
+    if tgid_input is None and gswarm_envelope:
+        tgid_input = gswarm_envelope.get("tgid") or gswarm_envelope.get("telegram_id")
+    if isinstance(tgid_input, int):
+        gswarm_tgid = str(tgid_input)
+    elif isinstance(tgid_input, str):
+        gswarm_tgid = tgid_input.strip() or None
+    else:
+        gswarm_tgid = None
 
-    await upsert(node_id, ip, meta, reported, gswarm_eoa, gswarm_peer_ids)
+    await upsert(node_id, ip, meta, reported, gswarm_eoa, gswarm_peer_ids, gswarm_tgid)
     return {"ok": True}
 
 @app.get("/api/nodes")
@@ -508,7 +628,12 @@ async def api_nodes():
 async def index(request: Request):
     return templates.TemplateResponse(
         "index.html",
-        {"request": request, "site_title": SITE_TITLE, "threshold": THRESHOLD}
+        {
+            "request": request,
+            "site_title": SITE_TITLE,
+            "threshold": THRESHOLD,
+            "admin_token": ADMIN_TOKEN,
+        }
     )
 
 @app.post("/api/gswarm/check")
@@ -528,16 +653,46 @@ async def gswarm_check(
     if include_nodes:
         extra_eoas, node_configs = await _gswarm_sources()
     extra_peer_ids = sorted({pid for cfg in node_configs.values() for pid in cfg.get("peer_ids", [])}) if node_configs else []
+    peer_groups = _collect_peer_groups(node_configs) if node_configs else {}
     result = await asyncio.to_thread(
         run_once,
         send_telegram=send,
         extra_peer_ids=extra_peer_ids,
         extra_eoas=extra_eoas,
+        offchain_peer_map=peer_groups,
     )
     if include_nodes and node_configs:
         node_stats, _ = await _persist_gswarm_result(result, node_configs)
         result["nodes"] = node_stats
     return result
+
+@app.post("/api/nodes/gswarm/alert")
+async def set_gswarm_alert(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None)
+):
+    if ADMIN_TOKEN and not admin_ok(authorization):
+        raise HTTPException(401, "Unauthorized")
+    node_id = str(payload.get("node_id", "")).strip()
+    if not node_id:
+        raise HTTPException(400, "node_id required")
+    enabled_raw = payload.get("enabled")
+    if isinstance(enabled_raw, str):
+        enabled_val = enabled_raw.strip().lower()
+        enabled = enabled_val not in {"0", "false", "no", "off"}
+    else:
+        enabled = bool(enabled_raw)
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,))
+        exists = await cur.fetchone()
+        if not exists:
+            raise HTTPException(404, "node not found")
+        await db.execute(
+            "UPDATE nodes SET gswarm_alert=? WHERE node_id=?",
+            (1 if enabled else 0, node_id)
+        )
+        await db.commit()
+    return {"ok": True, "node_id": node_id, "enabled": enabled}
 
 # ── Админ-API ─────────────────────────────────────────────────────────────────
 @app.post("/api/admin/rename")
@@ -604,5 +759,3 @@ async def admin_gswarm_refresh(authorization: Optional[str] = Header(default=Non
         raise HTTPException(401, "Unauthorized")
     await refresh_gswarm_stats()
     return {"ok": True}
-
-

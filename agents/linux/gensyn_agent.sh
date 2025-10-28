@@ -16,6 +16,7 @@ IP_CMD_V4="${IP_CMD_V4:-https://ipv4.icanhazip.com}"
 IP_CMD="${IP_CMD:-https://ifconfig.me}"
 GSWARM_EOA="${GSWARM_EOA:-}"
 GSWARM_PEER_IDS="${GSWARM_PEER_IDS:-}"  # comma-separated or JSON array
+GSWARM_TGID="${GSWARM_TGID:-}"          # optional per-node Telegram ID for off-chain stats
 
 # Extra detection knobs
 AUTO_KILL_EMPTY_SCREEN="${AUTO_KILL_EMPTY_SCREEN:-false}"
@@ -197,6 +198,9 @@ if [[ -n "$GSWARM_EOA" ]]; then
 fi
 if [[ -n "$GSWARM_PEER_IDS" ]]; then
   payload=$(printf '%s,"gswarm_peer_ids":"%s"' "$payload" "$(json_escape "$GSWARM_PEER_IDS")")
+fi
+if [[ -n "$GSWARM_TGID" ]]; then
+  payload=$(printf '%s,"gswarm_tgid":"%s"' "$payload" "$(json_escape "$GSWARM_TGID")")
 fi
 payload="${payload}}"
 

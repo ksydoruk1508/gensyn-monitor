@@ -24,7 +24,7 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, sans-serif;
       margin: 24px;
       transition: background .2s ease, color .2s ease;
     }
@@ -57,9 +57,12 @@
     tr.node-row { cursor: pointer; }
     tr.node-row:hover { background: rgba(127,127,127,.08); }
     body.dark tr.node-row:hover { background: rgba(255,255,255,.05); }
+    .alert-cell { text-align: center; }
+    .alert-toggle { width: 16px; height: 16px; cursor: pointer; }
+    .alert-toggle:disabled { cursor: not-allowed; opacity: .5; }
   </style>
 </head>
-<body>
+<body data-admin-token="{{ admin_token|default('', true)|e }}">
   <h1>{{ site_title }}</h1>
   <div class="toolbar">
     <span class="badge">Порог неактивности: {{ threshold }}s</span>
@@ -67,7 +70,6 @@
     <button id="themeBtn">Dark mode</button>
     <span class="muted" id="updatedAt"></span>
   </div>
-
   <table id="tbl">
     <thead>
       <tr>
@@ -77,139 +79,200 @@
         <th>Последний heartbeat</th>
         <th>Возраст, сек</th>
         <th>G-Swarm</th>
+        <th>Alerts</th>
         <th>Meta</th>
       </tr>
     </thead>
     <tbody></tbody>
-    <tfoot><tr><td colspan="7" class="muted">Автообновление каждые 10 секунд</td></tr></tfoot>
+    <tfoot><tr><td colspan="8" class="muted">Автообновление каждые 10 секунд</td></tr></tfoot>
   </table>
+  <script>
+    const ADMIN_TOKEN = document.body.dataset.adminToken || '';
+    const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
-<script>
-const fmtTs = (ts) => new Date(ts * 1000).toLocaleString();
-const shortPeer = (pid = '') => pid.length > 8 ? `${pid.slice(0, 3)}...${pid.slice(-3)}` : pid;
-const esc = (str = '') => String(str).replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-const formatCheckTime = (str) => {
-  if (!str) return '';
-  const iso = str.includes('T') ? str : `${str.replace(' ', 'T')}Z`;
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? str : d.toLocaleString();
-};
-const tbody = document.querySelector('#tbl tbody');
-const updatedAtEl = document.getElementById('updatedAt');
-const expandedNodes = new Set();
+    const fmtTs = (ts) => new Date(ts * 1000).toLocaleString();
+    const shortPeer = (pid = '') => (pid.length > 8 ? `${pid.slice(0, 3)}...${pid.slice(-3)}` : pid);
+    const esc = (str = '') => String(str).replace(/[&<>"']/g, (ch) => escapeMap[ch] || ch);
+    const formatCheckTime = (str) => {
+      if (!str) return '';
+      const iso = str.includes('T') ? str : `${str.replace(' ', 'T')}Z`;
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? str : d.toLocaleString();
+    };
 
-function renderGswarmSummary(gs) {
-  if (!gs) return '<span class="muted">—</span>';
-  const stats = gs.stats || {};
-  const totals = stats.totals || {};
-  const wins = totals.wins ?? '—';
-  const rew = totals.rewards ?? '—';
-  const peers = (gs.peer_ids && gs.peer_ids.length) ? gs.peer_ids.length : (totals.peers ?? '—');
-  const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
-  const eoa = gs.eoa || stats.eoa;
-  return `<div>
-    <div><strong>Wins ${wins}</strong> · Rewards ${rew}</div>
-    <div class="muted small">Peers: ${peers}${last ? ` · Last ${esc(last)}` : ''}</div>
-    ${eoa ? `<div class="muted small">EOA: <code>${esc(eoa)}</code></div>` : ''}
-  </div>`;
-}
+    const tbody = document.querySelector('#tbl tbody');
+    const updatedAtEl = document.getElementById('updatedAt');
+    const expandedNodes = new Set();
 
-function renderGswarmDetail(gs) {
-  if (!gs) {
-    return '<div class="muted">G-Swarm данные отсутствуют</div>';
-  }
-  const stats = gs.stats || {};
-  const totals = stats.totals || {};
-  const per = stats.per_peer || {};
-  const peers = (gs.peer_ids && gs.peer_ids.length ? gs.peer_ids : Object.keys(per)).filter(Boolean);
-  const peerCards = peers.map((pid) => {
-    const data = per[pid] || {};
-    const wins = data.wins ?? 0;
-    const rewards = data.rewards ?? 0;
-    const rank = data.rank ? `Top #${esc(data.rank)}` : '—';
-    return `<div class="peer-badge">
-      <div><code>${esc(pid)}</code></div>
-      <div>${wins} wins · ${rewards} rewards · ${rank}</div>
-    </div>`;
-  }).join('');
-  const missing = stats.missing_peers && stats.missing_peers.length
-    ? `<div class="warn">Missing peers: ${stats.missing_peers.map((p) => esc(p)).join(', ')}</div>`
-    : '';
-  const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
-  const eoaVal = gs.eoa || stats.eoa;
-  const eoa = eoaVal ? `<div class="small">EOA: <code>${esc(eoaVal)}</code></div>` : '';
-  return `<div class="gswarm-card">
-    <div class="gswarm-head">Wins ${totals.wins ?? 0} · Rewards ${totals.rewards ?? 0}</div>
-    <div class="peer-list">${peerCards || '<span class="muted">Peers не заданы</span>'}</div>
-    ${missing}
-    ${eoa}
-    ${last ? `<div class="small">Last: ${esc(last)}</div>` : ''}
-  </div>`;
-}
-
-async function load() {
-  try {
-    const res = await fetch('/api/nodes', { cache: 'no-store' });
-    const data = await res.json();
-
-    data.sort((a,b) => (a.computed === 'DOWN') === (b.computed === 'DOWN') ? a.node_id.localeCompare(b.node_id) : (a.computed === 'DOWN' ? -1 : 1));
-
-    tbody.innerHTML = '';
-    for (const n of data) {
-      const tr = document.createElement('tr');
-      tr.classList.add('node-row');
-      const metaFull = (n.meta || '').toString();
-      const metaShort = metaFull.slice(0, 80);
-      tr.innerHTML = `
-        <td><code>${esc(n.node_id)}</code></td>
-        <td><code>${esc(n.ip || '')}</code></td>
-        <td class="${n.computed}">${n.computed}</td>
-        <td class="muted">${fmtTs(n.last_seen)}</td>
-        <td>${n.age_sec}</td>
-        <td>${renderGswarmSummary(n.gswarm)}</td>
-        <td><span class="pill" title="${esc(metaFull)}">${esc(metaShort)}</span></td>
+    function renderGswarmSummary(gs) {
+      if (!gs) return '<span class="muted">n/a</span>';
+      const stats = gs.stats || {};
+      const totals = stats.totals || {};
+      const wins = totals.wins ?? 'n/a';
+      const rewards = totals.rewards ?? 'n/a';
+      const peers = (gs.peer_ids && gs.peer_ids.length) ? gs.peer_ids.length : (totals.peers ?? 'n/a');
+      const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
+      const eoa = gs.eoa || stats.eoa;
+      const tgid = gs.tgid || stats.tgid;
+      return `
+        <div>
+          <div><strong>Wins ${wins}</strong> | Rewards ${rewards}</div>
+          <div class="muted small">Peers: ${peers}${last ? ` | Last ${esc(last)}` : ''}</div>
+          ${eoa ? `<div class="muted small">EOA: <code>${esc(eoa)}</code></div>` : ''}
+          ${tgid ? `<div class="muted small">TG ID: <code>${esc(tgid)}</code></div>` : ''}
+        </div>
       `;
+    }
 
-      const detail = document.createElement('tr');
-      detail.className = 'detail-row hidden';
-      detail.innerHTML = `<td colspan="7">${renderGswarmDetail(n.gswarm)}</td>`;
+    function renderGswarmDetail(gs) {
+      if (!gs) {
+        return '<div class="muted">G-Swarm данные отсутствуют</div>';
+      }
+      const stats = gs.stats || {};
+      const totals = stats.totals || {};
+      const per = stats.per_peer || {};
+      const peers = (gs.peer_ids && gs.peer_ids.length ? gs.peer_ids : Object.keys(per)).filter(Boolean);
+      const peerCards = peers.map((pid) => {
+        const data = per[pid] || {};
+        const wins = data.wins ?? 0;
+        const rewards = data.rewards ?? 0;
+        const rank = data.rank ? `Top #${esc(data.rank)}` : 'n/a';
+        return `
+          <div class="peer-badge">
+            <div><code>${esc(pid)}</code></div>
+            <div>${wins} wins | ${rewards} rewards | ${rank}</div>
+          </div>
+        `;
+      }).join('');
+      const missing = stats.missing_peers && stats.missing_peers.length
+        ? `<div class="warn">Missing peers: ${stats.missing_peers.map((p) => esc(p)).join(', ')}</div>`
+        : '';
+      const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
+      const eoaVal = gs.eoa || stats.eoa;
+      const tgidVal = gs.tgid || stats.tgid;
+      const tgid = tgidVal ? `<div class="small">TG ID: <code>${esc(tgidVal)}</code></div>` : '';
+      const eoa = eoaVal ? `<div class="small">EOA: <code>${esc(eoaVal)}</code></div>` : '';
+      return `
+        <div class="gswarm-card">
+          <div class="gswarm-head">Wins ${totals.wins ?? 0} | Rewards ${totals.rewards ?? 0}</div>
+          <div class="peer-list">${peerCards || '<span class="muted">Peers не найдены</span>'}</div>
+          ${missing}
+          ${eoa}
+          ${tgid}
+          ${last ? `<div class="small">Last: ${esc(last)}</div>` : ''}
+        </div>
+      `;
+    }
 
-      tr.addEventListener('click', () => {
-        if (detail.classList.toggle('hidden')) {
-          expandedNodes.delete(n.node_id);
-        } else {
-          expandedNodes.add(n.node_id);
+    async function setAlert(nodeId, enabled, checkbox) {
+      try {
+        checkbox.disabled = true;
+        const headers = { 'Content-Type': 'application/json' };
+        if (ADMIN_TOKEN) {
+          headers['Authorization'] = `Bearer ${ADMIN_TOKEN}`;
         }
-      });
-
-      tbody.appendChild(tr);
-      tbody.appendChild(detail);
-      if (expandedNodes.has(n.node_id)) {
-        detail.classList.remove('hidden');
+        const res = await fetch('/api/nodes/gswarm/alert', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ node_id: nodeId, enabled }),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const payload = await res.json();
+        if (!payload.ok) {
+          throw new Error(payload.error || 'unknown error');
+        }
+      } catch (err) {
+        checkbox.checked = !enabled;
+        alert('Не удалось обновить настройки Telegram: ' + err);
+      } finally {
+        checkbox.disabled = false;
       }
     }
-    updatedAtEl.textContent = 'Обновлено: ' + new Date().toLocaleTimeString();
-  } catch (e) {
-    updatedAtEl.textContent = 'Ошибка загрузки...';
-  }
-}
 
-document.getElementById('refreshBtn').addEventListener('click', load);
-const themeBtn = document.getElementById('themeBtn');
-function applyTheme(theme) {
-  document.body.classList.toggle('dark', theme === 'dark');
-  themeBtn.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
-}
-const savedTheme = localStorage.getItem('theme') || 'light';
-applyTheme(savedTheme);
-themeBtn.addEventListener('click', () => {
-  const next = document.body.classList.contains('dark') ? 'light' : 'dark';
-  localStorage.setItem('theme', next);
-  applyTheme(next);
-});
+    async function load() {
+      try {
+        const res = await fetch('/api/nodes', { cache: 'no-store' });
+        const data = await res.json();
+        data.sort((a, b) => (a.computed === 'DOWN') === (b.computed === 'DOWN')
+          ? a.node_id.localeCompare(b.node_id)
+          : (a.computed === 'DOWN' ? -1 : 1));
 
-load();
-setInterval(load, 10000);
-</script>
+        tbody.innerHTML = '';
+        for (const n of data) {
+          const tr = document.createElement('tr');
+          tr.classList.add('node-row');
+          const metaFull = (n.meta || '').toString();
+          const metaShort = metaFull.slice(0, 80);
+          const alertChecked = n.gswarm_alert === false ? '' : ' checked';
+          const allowAlerts = Boolean(ADMIN_TOKEN);
+          const alertDisabled = allowAlerts ? '' : ' disabled';
+          const alertTitle = allowAlerts ? 'Toggle Telegram alerts' : 'Alerts disabled (ADMIN_TOKEN missing)';
+          tr.innerHTML = `
+            <td><code>${esc(n.node_id)}</code></td>
+            <td><code>${esc(n.ip || '')}</code></td>
+            <td class="${n.computed}">${n.computed}</td>
+            <td class="muted">${fmtTs(n.last_seen)}</td>
+            <td>${n.age_sec}</td>
+            <td>${renderGswarmSummary(n.gswarm)}</td>
+            <td class="alert-cell"><input type="checkbox" class="alert-toggle"${alertChecked}${alertDisabled} title="${esc(alertTitle)}"></td>
+            <td><span class="pill" title="${esc(metaFull)}">${esc(metaShort)}</span></td>
+          `;
+
+          const detail = document.createElement('tr');
+          detail.className = 'detail-row hidden';
+          detail.innerHTML = `<td colspan="8">${renderGswarmDetail(n.gswarm)}</td>`;
+
+          tr.addEventListener('click', () => {
+            if (detail.classList.toggle('hidden')) {
+              expandedNodes.delete(n.node_id);
+            } else {
+              expandedNodes.add(n.node_id);
+            }
+          });
+
+          tbody.appendChild(tr);
+          tbody.appendChild(detail);
+          if (expandedNodes.has(n.node_id)) {
+            detail.classList.remove('hidden');
+          }
+
+          const toggle = tr.querySelector('.alert-toggle');
+          if (toggle) {
+            toggle.addEventListener('click', (ev) => ev.stopPropagation());
+            toggle.addEventListener('change', (ev) => {
+              if (!ADMIN_TOKEN) {
+                ev.target.checked = !ev.target.checked;
+                return;
+              }
+              setAlert(n.node_id, ev.target.checked, ev.target);
+            });
+          }
+        }
+
+        updatedAtEl.textContent = 'Updated: ' + new Date().toLocaleTimeString();
+      } catch (e) {
+        updatedAtEl.textContent = 'Failed to refresh data';
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', load);
+    const themeBtn = document.getElementById('themeBtn');
+    function applyTheme(theme) {
+      document.body.classList.toggle('dark', theme === 'dark');
+      themeBtn.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+    }
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    applyTheme(savedTheme);
+    themeBtn.addEventListener('click', () => {
+      const next = document.body.classList.contains('dark') ? 'light' : 'dark';
+      localStorage.setItem('theme', next);
+      applyTheme(next);
+    });
+
+    load();
+    setInterval(load, 10000);
+  </script>
 </body>
 </html>
