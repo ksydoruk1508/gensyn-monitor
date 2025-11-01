@@ -309,6 +309,7 @@ prompt_monitor_env() {
     else
       echo "GSWARM_NODE_MAP="
     fi
+    write_kv "DB_PATH" "${repo}/monitor.db"
   } >"$tmp"
   mv -f "$tmp" "$env_file"
   echo "[+] Файл .env обновлён: $env_file"
