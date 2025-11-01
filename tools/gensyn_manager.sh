@@ -980,7 +980,7 @@ main_menu(){
     echo "15) $(tr m15)"
     hr
     echo "16) $(tr m16)"
-    echo "17) $(tr m17)"
+    echo "0) $(tr m0)"
     hr
 
     read -rp "> " ch
@@ -1001,7 +1001,7 @@ main_menu(){
       14) watchdog_logs ;;
       15) remove_autorestart ;;
       16) choose_lang ;;
-      17) exit 0 ;;
+      0) exit 0 ;;
       *)  ;;
     esac
 
