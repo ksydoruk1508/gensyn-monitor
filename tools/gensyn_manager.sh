@@ -1,51 +1,59 @@
 #!/usr/bin/env bash
-#
-# Gensyn Manager
-# - prepare machine
-# - install/update/remove dashboard monitor
-# - install/reinstall/remove heartbeat agent
-# - install/remove autorestart (watchdog + launcher)
-# - show status/logs
-#
-set -euo pipefail
+# ============================================================================
+# Gensyn Manager — monitor / agent / autorestart (RU/EN)
+# Repo:  https://github.com/ksydoruk1508/gensyn-monitor
+# Target: Ubuntu/Debian (нужен root/sudo)
+# Version: 1.0.0
+# ============================================================================
+set -Eeuo pipefail
 
-########################################
-# Color setup
-########################################
-RED="\033[31m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-BLUE="\033[34m"
-BOLD="\033[1m"
-RESET="\033[0m"
+# -----------------------------
+# Colors / UI
+# -----------------------------
+cG=$'\033[0;32m'; cC=$'\033[0;36m'; cB=$'\033[0;34m'; cR=$'\033[0;31m'
+cY=$'\033[1;33m'; cM=$'\033[1;35m'; c0=$'\033[0m'; cBold=$'\033[1m'; cDim=$'\033[2m'
 
-########################################
-# Global language (will be set in choose_lang)
-########################################
-LANG_MODE="RU"   # default RU, we'll ask on start
+ok()   { echo -e "${cG}[OK]${c0} ${*}"; }
+info() { echo -e "${cC}[INFO]${c0} ${*}"; }
+warn() { echo -e "${cY}[WARN]${c0} ${*}"; }
+err()  { echo -e "${cR}[ERR]${c0} ${*}"; }
+hr()   { echo -e "${cDim}────────────────────────────────────────────────────────${c0}"; }
 
-########################################
-# Paths / constants
-########################################
+logo(){ cat <<'EOF'
+ _   _           _  _____
+| \ | |         | ||____ |
+|  \| | ___   __| |    / /_ __
+| . ` |/ _ \ / _` |    \ \ '__|
+| |\  | (_) | (_| |.___/ / |
+\_| \_/\___/ \__,_|\____/|_|
 
+        Gensyn Manager
+    https://t.me/NodesN3R
+EOF
+}
+
+SCRIPT_VERSION="1.0.0"
+
+# -----------------------------
+# Paths / Constants
+# -----------------------------
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# IMPORTANT:
-# Must point to your repo
+# важно: репозиторий и RAW должны быть из твоего гита
 REPO_URL="https://github.com/ksydoruk1508/gensyn-monitor.git"
 REPO_DIR="/opt/gensyn-monitor"
 RAW_BASE="https://raw.githubusercontent.com/ksydoruk1508/gensyn-monitor/main"
 
 SERVICE_NAME="gensyn-monitor"
 
-# heartbeat agent
+# агент (heartbeat sender)
 AGENT_BIN="/usr/local/bin/gensyn_agent.sh"
 AGENT_ENV="/etc/gensyn-agent.env"
 AGENT_SERVICE="/etc/systemd/system/gensyn-agent.service"
 AGENT_TIMER="/etc/systemd/system/gensyn-agent.timer"
 
-# autorestart (watchdog + screen launcher)
+# авторестарт роя (watchdog + screen launcher)
 WATCHDOG_BIN="/usr/local/bin/gensyn-watchdog.sh"
 WATCHDOG_SERVICE="/etc/systemd/system/gensyn-watchdog.service"
 WATCHDOG_TIMER="/etc/systemd/system/gensyn-watchdog.timer"
@@ -53,398 +61,313 @@ WATCHDOG_TIMER="/etc/systemd/system/gensyn-watchdog.timer"
 LAUNCHER_BIN="/usr/local/bin/gensyn-screen-launcher.sh"
 LAUNCHER_SERVICE="/etc/systemd/system/gensyn-screen-launcher.service"
 
+# лог работы роя внутри screen gensyn
 SWARM_LOG="/var/log/gensyn-swarm.log"
 
-########################################
-# i18n helpers
-########################################
+# -----------------------------
+# Language (RU/EN)
+# -----------------------------
+LANG="ru"
 
-t_banner() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    cat <<'EOF'
- _   _           _  _____
-| \ | |         | ||____ |
-|  \| | ___   __| |    / /_ __
-| . ` |/ _ \ / _` |    \ \ '__|
-| |\  | (_) | (_| |.___/ / |
-\_| \_/\___/ \__,_|\____/|_|
-
-     Gensyn Manager
-   @NodesN3R / autosync
-EOF
-  else
-    cat <<'EOF'
- _   _           _  _____
-| \ | |         | ||____ |
-|  \| | ___   __| |    / /_ __
-| . ` |/ _ \ / _` |    \ \ '__|
-| |\  | (_) | (_| |.___/ / |
-\_| \_/\___/ \__,_|\____/|_|
-
-     Gensyn Manager
-   @NodesN3R / автоподдержка
-EOF
-  fi
+choose_lang(){
+  clear; logo
+  echo -e "\n${cBold}${cM}Select language / Выберите язык${c0}"
+  echo "1) Русский"
+  echo "2) English"
+  read -rp "> " a
+  case "${a:-}" in
+    2) LANG="en" ;;
+    *) LANG="ru" ;;
+  esac
 }
 
-t_choose_lang_prompt() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Language is set to EN."
-  else
-    echo "Текущий язык RU. Хочешь переключиться на EN? (y/N): "
-  fi
-}
+tr(){
+  local k="${1:-}"; [[ -z "$k" ]] && return 0
+  if [[ "$LANG" == "en" ]]; then
+    case "$k" in
+      need_root)          echo "Run as root (sudo) — some actions will fail otherwise.";;
 
-# log wrappers with color
-say_info() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    printf "${BLUE}[i]${RESET} %s\n" "$*"
-  else
-    printf "${BLUE}[i]${RESET} %s\n" "$*"  # текст уже переведём в момент вызова
-  fi
-}
-say_ok() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    printf "${GREEN}[+]${RESET} %s\n" "$*"
-  else
-    printf "${GREEN}[+]${RESET} %s\n" "$*"
-  fi
-}
-say_warn() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    printf "${YELLOW}[!]${RESET} %s\n" "$*"
-  else
-    printf "${YELLOW}[!]${RESET} %s\n" "$*"
-  fi
-}
-say_err() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    printf "${RED}[x]${RESET} %s\n" "$*" >&2
-  else
-    printf "${RED}[x]${RESET} %s\n" "$*" >&2
-  fi
-}
+      deps_begin)         echo "Installing base deps (python3, curl, jq, etc.)...";;
+      deps_done)          echo "Base deps installed.";;
 
-# short translated strings we reuse
-msg_need_root() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Run as root (sudo $0)"
-  else
-    echo "Запусти от root (sudo $0)"
-  fi
-}
-msg_port_in_use() {
-  local port="$1"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Port $port is already in use. Pick another port or stop that process."
-  else
-    echo "Порт $port уже занят. Освободи порт или выбери другой."
-  fi
-}
-msg_firewall_question() {
-  local port="$1"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo -n "Open ${port}/tcp in firewall? (y/N): "
-  else
-    echo -n "Открыть порт ${port}/tcp во внешнем firewall? (y/N): "
-  fi
-}
-msg_invalid_number() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Must be a number."
-  else
-    echo "Нужно число."
-  fi
-}
-msg_json_hint() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "GSWARM_NODE_MAP must be valid JSON or empty. Example:"
-  else
-    echo "GSWARM_NODE_MAP должен быть валидным JSON или пустым. Пример:"
-  fi
-}
-msg_json_bad() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Invalid JSON. Using empty."
-  else
-    echo "JSON некорректный. Оставляю пусто."
-  fi
-}
-msg_repo_not_found() {
-  local repo="$1"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Repo $repo not found. Install monitor first."
-  else
-    echo "Каталог $repo не найден. Сначала поставь монитор."
-  fi
-}
-msg_monitor_running() {
-  local port="$1"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Monitor is running on port $port"
-  else
-    echo "Мониторинг запущен на порту $port"
-  fi
-}
-msg_monitor_removed() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Monitor removed."
-  else
-    echo "Мониторинг удалён."
-  fi
-}
-msg_keep_repo_question() {
-  local path="$1"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Delete repo directory ($path)? (y/N): "
-  else
-    echo "Удалить директорию репозитория ($path)? (y/N): "
-  fi
-}
-msg_repo_kept() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Keeping repo directory."
-  else
-    echo "Каталог оставлен."
-  fi
-}
-msg_agent_enabled() {
-  local timer="$1"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Agent enabled (timer $timer)"
-  else
-    echo "Агент включён (таймер $timer)"
-  fi
-}
-msg_swarm_tail_head() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "=== tail of swarm log (rl-swarm inside screen gensyn) ==="
-  else
-    echo "=== хвост лога роя (rl-swarm внутри screen gensyn) ==="
-  fi
-}
-msg_watchdog_live() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "=== live watchdog logs (Ctrl+C to exit) ==="
-  else
-    echo "=== живые логи watchdog (Ctrl+C чтобы выйти) ==="
-  fi
-}
-msg_autorestart_installed() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Autorestart installed."
-  else
-    echo "Авторестарт установлен."
-  fi
-}
-msg_autorestart_removed() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Autorestart removed."
-  else
-    echo "Авторестарт удалён."
-  fi
-}
+      ask_uvicorn_port)   echo "Uvicorn port for dashboard:";;
+      ask_repo_dir)       echo "Install directory for repo:";;
+      venv_setup)         echo "Setting up venv and Python deps...";;
+      monitor_ok)         echo "Monitor is running on port";;
+      monitor_upd_done)   echo "Monitor updated and restarted.";;
 
-t_menu() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    cat <<EOF
+      env_intro)          echo "Configuring .env for dashboard monitor";;
+      env_found)          echo ".env exists, empty answer keeps old value.";;
 
-${BOLD}=== Gensyn Manager Menu ===${RESET}
+      ask_bot)            echo "TELEGRAM_BOT_TOKEN";;
+      ask_chat)           echo "TELEGRAM_CHAT_ID";;
+      ask_shared)         echo "SHARED_SECRET";;
+      ask_admin)          echo "ADMIN_TOKEN (optional)";;
+      ask_title)          echo "SITE_TITLE";;
+      ask_thr)            echo "DOWN_THRESHOLD_SEC (seconds)";;
+      ask_intv)           echo "GSWARM_REFRESH_INTERVAL (seconds)";;
+      ask_show_src)       echo "GSWARM_SHOW_SRC (auto/always/never)";;
+      ask_autosend)       echo "GSWARM_AUTO_SEND (0/1)";;
+      env_json_hint_1)    echo "GSWARM_NODE_MAP must be valid JSON or empty."; ;;
+      env_json_hint_2)    echo "Example: {\"node-1\":{\"eoa\":\"0x...\",\"peer_ids\":[\"Qm..\"],\"tgid\":\"123456\"}}";;
+      ask_nodemap)        echo "GSWARM_NODE_MAP (JSON or empty)";;
+      bad_json)           echo "Invalid JSON. Using empty.";;
 
-[ Machine / Monitor ]
-  1) Prepare machine (deps)
-  2) Install dashboard monitor
-  3) Update dashboard monitor
-  4) Monitor status
-  5) Monitor logs
-  6) Remove dashboard monitor
+      env_done)           echo ".env updated:";;
 
-[ Agent (heartbeat sender) ]
-  7)  Install agent
-  8)  Reinstall agent (stop+install)
-  9)  Show agent config
-  10) Agent status
-  11) Agent logs
-  12) Remove agent
+      port_busy)          echo "Port is already in use. Pick another port or stop that process:";;
+      fw_q)               echo "Open this port in firewall (ufw/firewalld)? (y/N):";;
+      fw_inactive)        echo "ufw is installed but inactive -> skipping rule."; ;
+      fw_skip)            echo "Skipping firewall config.";;
 
-[ Autorestart / watchdog ]
-  13) Install autorestart (watchdog + launcher)
-  14) Watchdog logs (live + swarm tail)
-  15) Remove autorestart
+      repo_not_found)     echo "Repo not found. Install monitor first.";;
 
-  0) Exit
+      monitor_dir_now)    echo "Current dashboard repo dir:";;
+      ask_delete_repo)    echo "Delete this directory? (y/N):";;
+      ask_confirm_rm)     echo "Confirm path to delete";;
+      repo_deleted)       echo "Removed:";;
+      repo_skip)          echo "Directory not removed (skipped).";;
+      monitor_removed)    echo "Monitor removed.";;
 
-EOF
+      agent_dl)           echo "Downloading agent files from GitHub raw...";;
+      agent_using_local)  echo "Using agent files from local repo:";;
+      ask_server)         echo "Monitor URL (ex http://host:8080)";;
+      ask_secret)         echo "SHARED_SECRET";;
+      ask_node)           echo "NODE_ID";;
+      ask_meta)           echo "META (freeform tag, optional)";;
+      ask_eoa)            echo "GSWARM_EOA (EOA address 0x..., optional)";;
+      ask_peers)          echo "GSWARM_PEER_IDS (comma-separated, optional)";;
+      ask_tgid)           echo "GSWARM_TGID (Telegram ID, optional)";;
+      ask_dashurl)        echo "DASH_URL (dashboard link for this node, optional)";;
+      ask_admin_token)    echo "ADMIN_TOKEN (/api/admin/delete token, optional)";;
+
+      agent_cfg_path)     echo "Agent config:";;
+      agent_timer_on)     echo "Agent enabled (timer)";;
+      agent_initial_push) echo "Requesting initial G-Swarm sync...";;
+      agent_initial_ok)   echo "Initial G-Swarm sync requested."; ;
+      agent_initial_fail) echo "Could not call G-Swarm API (skipped).";;
+
+      agent_old_removed)  echo "Old node_id removed from monitor."; ;
+      agent_old_fail)     echo "Could not remove old node_id from monitor."; ;
+
+      agent_env_missing)  echo "Agent env file not found.";;
+
+      ask_repo_keep)      echo "Keeping repo directory.";;
+
+      rm_agent_api)       echo "Removing node from monitor via /api/admin/delete...";;
+      rm_agent_done)      echo "Agent removed.";;
+
+      autorestart_install) echo "Installing autorestart (watchdog + launcher)...";;
+      autorestart_ok)      echo "Autorestart installed."; ;
+      autorestart_hint)    echo "Screen session name: gensyn (screen -ls / screen -r gensyn)";;
+
+      autorestart_logs_live) echo "=== live watchdog logs (Ctrl+C to exit) ===";;
+      autorestart_logs_tail) echo "=== tail of swarm log (rl-swarm inside screen gensyn) ===";;
+      swarmlog_empty)       echo "[i] swarm log empty or missing";;
+
+      autorestart_rm)       echo "Removing autorestart (watchdog + launcher)...";;
+      autorestart_rm_ok)    echo "Autorestart removed."; ;
+      swarm_left)           echo "Swarm log left in";;
+
+      press_enter)       echo "Press Enter to return to menu...";;
+
+      menu_title)        echo "Gensyn Manager — dashboard / agent / autorestart";;
+      m1)  echo "Prepare machine (deps)";;
+      m2)  echo "Install dashboard monitor";;
+      m3)  echo "Update dashboard monitor";;
+      m4)  echo "Monitor status";;
+      m5)  echo "Monitor logs";;
+      m6)  echo "Remove dashboard monitor";;
+
+      m7)  echo "Install agent";;
+      m8)  echo "Reinstall agent (stop+install)";;
+      m9)  echo "Show agent config";;
+      m10) echo "Agent status";;
+      m11) echo "Agent logs";;
+      m12) echo "Remove agent";;
+
+      m13) echo "Install autorestart (watchdog + launcher)";;
+      m14) echo "Watchdog logs (live + swarm tail)";;
+      m15) echo "Remove autorestart";;
+
+      m16) echo "Change language";;
+      m17) echo "Exit";;
+    esac
   else
-    cat <<EOF
+    case "$k" in
+      need_root)          echo "Нужны root-права (sudo), иначе часть действий упрётся в отказ.";;
 
-${BOLD}=== Меню Gensyn Manager ===${RESET}
+      deps_begin)         echo "Ставлю базовые зависимости (python3, curl, jq и так далее)...";;
+      deps_done)          echo "Зависимости установлены.";;
 
-[ Сервер / Мониторинг ]
-  1) Подготовить сервер (зависимости)
-  2) Установить мониторинг (дашборд)
-  3) Обновить мониторинг
-  4) Статус мониторинга
-  5) Логи мониторинга
-  6) Удалить мониторинг
+      ask_uvicorn_port)   echo "Порт uvicorn для дашборда:";;
+      ask_repo_dir)       echo "Куда ставим репозиторий:";;
+      venv_setup)         echo "Готовлю venv и питон-зависимости...";;
+      monitor_ok)         echo "Мониторинг поднят на порту";;
+      monitor_upd_done)   echo "Монитор обновлён и перезапущен.";;
 
-[ Агент (heartbeat sender) ]
-  7)  Установить агента
-  8)  Переустановить агента (остановить+установить)
-  9)  Показать конфиг агента
-  10) Статус агента
-  11) Логи агента
-  12) Удалить агента
+      env_intro)          echo "Настраиваю .env для дашборда мониторинга";;
+      env_found)          echo ".env уже есть, пустой ответ оставит старое значение.";;
 
-[ Авторестарт / watchdog ]
-  13) Установить авторестарт (watchdog + launcher)
-  14) Логи авторестарта (онлайн + хвост роя)
-  15) Удалить авторестарт
+      ask_bot)            echo "TELEGRAM_BOT_TOKEN";;
+      ask_chat)           echo "TELEGRAM_CHAT_ID";;
+      ask_shared)         echo "SHARED_SECRET";;
+      ask_admin)          echo "ADMIN_TOKEN (опционально)";;
+      ask_title)          echo "SITE_TITLE";;
+      ask_thr)            echo "DOWN_THRESHOLD_SEC (в секундах)";;
+      ask_intv)           echo "GSWARM_REFRESH_INTERVAL (в секундах)";;
+      ask_show_src)       echo "GSWARM_SHOW_SRC (auto/always/never)";;
+      ask_autosend)       echo "GSWARM_AUTO_SEND (0/1)";;
+      env_json_hint_1)    echo "GSWARM_NODE_MAP — валидный JSON или пусто."; ;;
+      env_json_hint_2)    echo "Пример: {\"node-1\":{\"eoa\":\"0x...\",\"peer_ids\":[\"Qm..\"],\"tgid\":\"123456\"}}";;
+      ask_nodemap)        echo "GSWARM_NODE_MAP (JSON или пусто)";;
+      bad_json)           echo "JSON кривой. Оставляю пусто.";;
 
-  0) Выход
+      env_done)           echo ".env обновлён:";;
 
-EOF
+      port_busy)          echo "Порт уже занят. Освободи порт или выбери другой:";;
+      fw_q)               echo "Открыть этот порт во фаерволе (ufw/firewalld)? (y/N):";;
+      fw_inactive)        echo "ufw есть, но он выключен. Пропускаю правило."; ;
+      fw_skip)            echo "Фаервол трогать не будем.";;
+
+      repo_not_found)     echo "Каталог с монитором не найден. Сначала поставь монитор.";;
+
+      monitor_dir_now)    echo "Папка дашборда сейчас:";;
+      ask_delete_repo)    echo "Удалить эту папку? (y/N):";;
+      ask_confirm_rm)     echo "Подтверди путь, который удаляем";;
+      repo_deleted)       echo "Удалил:";;
+      repo_skip)          echo "Папку не трогаю."; ;
+      monitor_removed)    echo "Мониторинг удалён.";;
+
+      agent_dl)           echo "Скачиваю файлы агента из GitHub raw...";;
+      agent_using_local)  echo "Беру файлы агента с диска:";;
+      ask_server)         echo "URL мониторинга (например http://host:8080)";;
+      ask_secret)         echo "SHARED_SECRET";;
+      ask_node)           echo "NODE_ID";;
+      ask_meta)           echo "META (любая подпись узла, можно пусто)";;
+      ask_eoa)            echo "GSWARM_EOA (0x..., опционально)";;
+      ask_peers)          echo "GSWARM_PEER_IDS (через запятую, опционально)";;
+      ask_tgid)           echo "GSWARM_TGID (Telegram ID, опц.)";;
+      ask_dashurl)        echo "DASH_URL (ссылка на ноду в дашборде, опц.)";;
+      ask_admin_token)    echo "ADMIN_TOKEN (для /api/admin/delete, опц.)";;
+
+      agent_cfg_path)     echo "Конфиг агента:";;
+      agent_timer_on)     echo "Агент включён (таймер)";;
+      agent_initial_push) echo "Дёргаю первичный сбор G-Swarm...";;
+      agent_initial_ok)   echo "Запросил первичный сбор G-Swarm."; ;
+      agent_initial_fail) echo "Не получилось дёрнуть G-Swarm API, пропустил.";;
+
+      agent_old_removed)  echo "Старый node_id убран из монитора."; ;
+      agent_old_fail)     echo "Не смог убрать старый node_id с монитора."; ;
+
+      agent_env_missing)  echo "Файл окружения агента не найден.";;
+
+      ask_repo_keep)      echo "Каталог оставляем.";;
+
+      rm_agent_api)       echo "Удаляю ноду из монитора через /api/admin/delete...";;
+      rm_agent_done)      echo "Агент удалён.";;
+
+      autorestart_install) echo "Ставлю авторестарт (watchdog + launcher)...";;
+      autorestart_ok)      echo "Авторестарт установлен."; ;
+      autorestart_hint)    echo "screen-сессия будет называться gensyn (screen -ls / screen -r gensyn)";;
+
+      autorestart_logs_live) echo "=== живые логи watchdog (Ctrl+C чтобы выйти) ===";;
+      autorestart_logs_tail) echo "=== хвост лога роя (rl-swarm внутри screen gensyn) ===";;
+      swarmlog_empty)       echo "[i] лог роя пустой или ещё не создался";;
+
+      autorestart_rm)       echo "Убираю авторестарт (watchdog + launcher)...";;
+      autorestart_rm_ok)    echo "Авторестарт удалён."; ;
+      swarm_left)           echo "Лог роя оставил в";;
+
+      press_enter)       echo "Нажми Enter чтобы вернуться в меню...";;
+
+      menu_title)        echo "Gensyn Manager — монитор / агент / авторестарт";;
+      m1)  echo "Подготовить сервер (зависимости)";;
+      m2)  echo "Установить мониторинг (дашборд)";;
+      m3)  echo "Обновить мониторинг";;
+      m4)  echo "Статус мониторинга";;
+      m5)  echo "Логи мониторинга";;
+      m6)  echo "Удалить мониторинг";;
+
+      m7)  echo "Установить агента";;
+      m8)  echo "Переустановить агента (остановить+установить)";;
+      m9)  echo "Показать конфиг агента";;
+      m10) echo "Статус агента";;
+      m11) echo "Логи агента";;
+      m12) echo "Удалить агента";;
+
+      m13) echo "Поставить авторестарт (watchdog + launcher)";;
+      m14) echo "Логи авторестарта (онлайн + хвост роя)";;
+      m15) echo "Удалить авторестарт";;
+
+      m16) echo "Сменить язык / Change language";;
+      m17) echo "Выход";;
+    esac
   fi
 }
 
-t_choose_option() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo -n "Choose option: "
-  else
-    echo -n "Выбери пункт: "
-  fi
-}
-
-t_firewalld_inactive() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "ufw is installed but inactive -> rule not added."
-  else
-    echo "ufw установлен, но выключен. Правило не добавлено."
-  fi
-}
-
-t_skipping_firewall() {
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    echo "Skipping firewall config."
-  else
-    echo "Файрвол пропускаем."
-  fi
-}
-
-########################################
-# Basic helpers (root, shell tools, etc.)
-########################################
-
-need_root() {
+# -----------------------------
+# helpers
+# -----------------------------
+need_root(){
   if [[ $EUID -ne 0 ]]; then
-    say_err "$(msg_need_root)"
+    err "$(tr need_root)"
     exit 1
   fi
 }
 
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
+have_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
-current_repo_dir() {
-  local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
-  if [[ -f "$service_file" ]]; then
-    local dir
-    dir=$(awk -F= '/^WorkingDirectory=/{print $2; exit}' "$service_file")
-    if [[ -n "$dir" ]]; then
-      printf '%s' "$dir"
-      return 0
-    fi
+ask(){
+  local prompt="$1" def="${2:-}"
+  read -rp "${prompt}${def:+ [$def]}: " val || true
+  if [[ -z "${val:-}" && -n "$def" ]]; then
+    val="$def"
   fi
-  printf '%s' "$REPO_DIR"
+  printf '%s' "${val:-}"
 }
 
-ask() {
-  local prompt="$1" default="${2:-}"
-  local value
-  read -rp "$prompt${default:+ [$default]}: " value || true
-  if [[ -z "${value:-}" && -n "$default" ]]; then
-    value="$default"
-  fi
-  printf '%s' "${value:-}"
-}
-
-shell_quote() {
+shell_quote(){
   if have_cmd python3; then
     python3 - "$1" <<'PY'
-import shlex, sys
-value = sys.argv[1] if len(sys.argv) > 1 else ""
-print(shlex.quote(value))
+import shlex,sys
+v=sys.argv[1] if len(sys.argv)>1 else ""
+print(shlex.quote(v))
 PY
   else
     printf '%q' "$1"
   fi
 }
 
-json_string() {
+json_string(){
   if have_cmd python3; then
     python3 - "$1" <<'PY'
-import json, sys
-print(json.dumps(sys.argv[1] if len(sys.argv) > 1 else ""))
+import json,sys
+print(json.dumps(sys.argv[1] if len(sys.argv)>1 else ""))
 PY
   else
-    local val="${1//\\/\\\\}"; val="${val//\"/\\\"}"
-    printf '"%s"' "$val"
+    local v="${1//\\/\\\\}"; v="${v//\"/\\\"}"
+    printf '"%s"' "$v"
   fi
 }
 
-ensure_dos2unix() {
+ensure_dos2unix(){
   if ! have_cmd dos2unix; then
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y dos2unix >/dev/null 2>&1 || true
   fi
 }
 
-crlf_fix() {
+crlf_fix(){
   ensure_dos2unix
   for f in "$@"; do
     [[ -f "$f" ]] && dos2unix -q "$f" || true
   done
 }
 
-wait_port_free() {
-  local port="$1"
-  if ss -ltn "( sport = :$port )" | grep -q ":$port"; then
-    say_err "$(msg_port_in_use "$port")"
-    ss -ltnp | grep ":$port" || true
-    exit 1
-  fi
-}
+is_number(){ [[ "$1" =~ ^[0-9]+$ ]]; }
 
-maybe_open_firewall_port() {
-  local port="$1"
-  read -rp "$(msg_firewall_question "$port")" answer || true
-  case "${answer,,}" in
-    y|yes)
-      if have_cmd ufw; then
-        local ufw_status
-        ufw_status=$(ufw status 2>/dev/null | head -n1 || true)
-        if [[ "$ufw_status" =~ inactive ]]; then
-          say_info "$(t_firewalld_inactive)"
-        else
-          say_info "ufw allow ${port}/tcp"
-          ufw allow "${port}/tcp" >/dev/null 2>&1 || ufw allow "${port}" >/dev/null 2>&1 || true
-          ufw reload >/dev/null 2>&1 || true
-        fi
-      elif have_cmd firewall-cmd; then
-        say_info "firewalld add-port ${port}/tcp"
-        firewall-cmd --add-port="${port}/tcp" >/dev/null 2>&1 || true
-        firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
-        firewall-cmd --reload >/dev/null 2>&1 || true
-      else
-        say_warn "No supported firewall (ufw/firewalld). Add rule manually if needed."
-      fi
-      ;;
-    *) say_info "$(t_skipping_firewall)" ;;
-  esac
-}
-
-is_number() { [[ "$1" =~ ^[0-9]+$ ]] ; }
-
-json_validate() {
+json_validate(){
   local s="$1"
   if have_cmd jq; then
     echo "$s" | jq -e . >/dev/null 2>&1
@@ -453,10 +376,10 @@ json_validate() {
     python3 - <<'PY' 2>/dev/null
 import json,sys
 try:
-    json.loads(sys.argv[1])
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
+  json.loads(sys.argv[1])
+  sys.exit(0)
+except:
+  sys.exit(1)
 PY
     return $?
   else
@@ -464,25 +387,99 @@ PY
   fi
 }
 
-write_kv() {
+write_kv(){
   local k="$1" v="$2"
   v=${v//$'\r'/}
   v=${v//$'\n'/}
   printf '%s=%s\n' "$k" "$v"
 }
 
-########################################
-# Monitor: env prompt / install / update / status / logs / remove
-########################################
+current_repo_dir(){
+  local svc="/etc/systemd/system/${SERVICE_NAME}.service"
+  if [[ -f "$svc" ]]; then
+    local d
+    d=$(awk -F= '/^WorkingDirectory=/{print $2; exit}' "$svc")
+    if [[ -n "$d" ]]; then
+      printf '%s' "$d"
+      return 0
+    fi
+  fi
+  printf '%s' "$REPO_DIR"
+}
 
-prompt_monitor_env() {
+wait_port_free(){
+  local port="$1"
+  if ss -ltn "( sport = :$port )" | grep -q ":$port"; then
+    err "$(tr port_busy)"
+    ss -ltnp | grep ":$port" || true
+    exit 1
+  fi
+}
+
+maybe_open_firewall_port(){
+  local port="$1"
+  read -rp "$(tr fw_q) " ans || true
+  case "${ans,,}" in
+    y|yes)
+      if have_cmd ufw; then
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -n1 || true)
+        if [[ "$ufw_status" =~ inactive ]]; then
+          info "$(tr fw_inactive)"
+        else
+          info "ufw allow ${port}/tcp"
+          ufw allow "${port}/tcp" >/dev/null 2>&1 || ufw allow "${port}" >/dev/null 2>&1 || true
+          ufw reload >/dev/null 2>&1 || true
+        fi
+      elif have_cmd firewall-cmd; then
+        info "firewalld add-port ${port}/tcp"
+        firewall-cmd --add-port="${port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+      else
+        warn "no ufw/firewalld found, add rule manually if needed."
+      fi
+      ;;
+    *)
+      info "$(tr fw_skip)"
+      ;;
+  esac
+}
+
+# -----------------------------
+# prepare machine
+# -----------------------------
+prepare_deps(){
+  need_root
+  info "$(tr deps_begin)"
+  apt-get update
+  apt-get install -y python3 python3-venv python3-pip git sqlite3 curl jq unzip ca-certificates
+  ok   "$(tr deps_done)"
+}
+
+# -----------------------------
+# clone/update repo
+# -----------------------------
+clone_or_update_repo(){
+  local dest="$1"
+  if [[ -d "$dest/.git" ]]; then
+    info "git pull in $dest"
+    git -C "$dest" fetch --all --prune >/dev/null 2>&1
+    git -C "$dest" reset --hard origin/main >/dev/null 2>&1
+  else
+    info "git clone to $dest"
+    mkdir -p "$(dirname "$dest")"
+    git clone "$REPO_URL" "$dest" >/dev/null 2>&1
+  fi
+}
+
+# -----------------------------
+# prompt .env for monitor
+# -----------------------------
+prompt_monitor_env(){
   local repo="$1" env_file="$repo/.env"
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Configuring .env for dashboard monitor"
-  else
-    say_info "Настраиваем .env для дашборда мониторинга"
-  fi
+  info "$(tr env_intro)"
 
   local _bot="${DEFAULT_TELEGRAM_BOT_TOKEN:-}"
   local _chat="${DEFAULT_TELEGRAM_CHAT_ID:-}"
@@ -496,11 +493,7 @@ prompt_monitor_env() {
   local _nodemap="${DEFAULT_GSWARM_NODE_MAP:-}"
 
   if [[ -f "$env_file" ]]; then
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      say_info "$env_file exists: empty answers will keep current values."
-    else
-      say_info "Нашёл $env_file. Пустой ответ оставит текущее значение."
-    fi
+    info "$(tr env_found)"
     set +u
     source "$env_file" 2>/dev/null || true
     _bot="${_bot:-${TELEGRAM_BOT_TOKEN:-}}"
@@ -516,78 +509,36 @@ prompt_monitor_env() {
     set -u
   fi
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    TE_BOT="$(ask "TELEGRAM_BOT_TOKEN" "$_bot")"
-    TE_CHAT="$(ask "TELEGRAM_CHAT_ID" "$_chat")"
-    SHARED="$(ask "SHARED_SECRET" "$_shared")"
-    ADMIN="$(ask "ADMIN_TOKEN (optional)" "$_admin")"
-    TITLE="$(ask "SITE_TITLE" "$_title")"
+  TE_BOT="$(ask "$(tr ask_bot)" "$_bot")"
+  TE_CHAT="$(ask "$(tr ask_chat)" "$_chat")"
+  SHARED="$(ask "$(tr ask_shared)" "$_shared")"
+  ADMIN="$(ask "$(tr ask_admin)" "$_admin")"
+  TITLE="$(ask "$(tr ask_title)" "$_title")"
 
-    THR="$(ask "DOWN_THRESHOLD_SEC (seconds)" "$_thr")"
-  else
-    TE_BOT="$(ask "TELEGRAM_BOT_TOKEN" "$_bot")"
-    TE_CHAT="$(ask "TELEGRAM_CHAT_ID" "$_chat")"
-    SHARED="$(ask "SHARED_SECRET" "$_shared")"
-    ADMIN="$(ask "ADMIN_TOKEN (опционально)" "$_admin")"
-    TITLE="$(ask "SITE_TITLE" "$_title")"
-
-    THR="$(ask "DOWN_THRESHOLD_SEC (в секундах)" "$_thr")"
-  fi
-
+  THR="$(ask "$(tr ask_thr)" "$_thr")"
   while [[ -n "$THR" ]] && ! is_number "$THR"; do
-    say_warn "$(msg_invalid_number)"
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      THR="$(ask "DOWN_THRESHOLD_SEC (seconds)" "$_thr")"
-    else
-      THR="$(ask "DOWN_THRESHOLD_SEC (в секундах)" "$_thr")"
-    fi
+    warn "number required"
+    THR="$(ask "$(tr ask_thr)" "$_thr")"
   done
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    INTV="$(ask "GSWARM_REFRESH_INTERVAL (seconds)" "$_interval")"
-  else
-    INTV="$(ask "GSWARM_REFRESH_INTERVAL (секунды)" "$_interval")"
-  fi
-
+  INTV="$(ask "$(tr ask_intv)" "$_interval")"
   while [[ -n "$INTV" ]] && ! is_number "$INTV"; do
-    say_warn "$(msg_invalid_number)"
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      INTV="$(ask "GSWARM_REFRESH_INTERVAL (seconds)" "$_interval")"
-    else
-      INTV="$(ask "GSWARM_REFRESH_INTERVAL (секунды)" "$_interval")"
-    fi
+    warn "number required"
+    INTV="$(ask "$(tr ask_intv)" "$_interval")"
   done
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    SHOW_SRC="$(ask "GSWARM_SHOW_SRC (auto/always/never)" "$_show_src")"
-  else
-    SHOW_SRC="$(ask "GSWARM_SHOW_SRC (auto/always/never)" "$_show_src")"
-  fi
+  SHOW_SRC="$(ask "$(tr ask_show_src)" "$_show_src")"
+  case "${SHOW_SRC,,}" in auto|always|never) ;; *) SHOW_SRC="auto";; esac
 
-  case "${SHOW_SRC,,}" in
-    always|never|auto) SHOW_SRC="${SHOW_SRC,,}" ;;
-    *) SHOW_SRC="auto" ;;
-  esac
-
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    AUTOSEND="$(ask "GSWARM_AUTO_SEND (0/1)" "$_autosend")"
-  else
-    AUTOSEND="$(ask "GSWARM_AUTO_SEND (0/1)" "$_autosend")"
-  fi
+  AUTOSEND="$(ask "$(tr ask_autosend)" "$_autosend")"
   [[ "$AUTOSEND" != "1" ]] && AUTOSEND="0"
 
   echo
-  msg_json_hint
-  echo '  {"node-1":{"eoa":"0x...","peer_ids":["Qm.."],"tgid":"123456"}}'
-
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    NODEMAP_INPUT="$(ask "GSWARM_NODE_MAP (JSON or empty)" "$_nodemap")"
-  else
-    NODEMAP_INPUT="$(ask "GSWARM_NODE_MAP (JSON или пусто)" "$_nodemap")"
-  fi
-
+  echo "$(tr env_json_hint_1)"
+  echo "$(tr env_json_hint_2)"
+  NODEMAP_INPUT="$(ask "$(tr ask_nodemap)" "$_nodemap")"
   if [[ -n "$NODEMAP_INPUT" ]] && ! json_validate "$NODEMAP_INPUT"; then
-    say_warn "$(msg_json_bad)"
+    warn "$(tr bad_json)"
     NODEMAP_INPUT=""
   fi
 
@@ -608,56 +559,21 @@ prompt_monitor_env() {
       echo "GSWARM_NODE_MAP="
     fi
     write_kv "DB_PATH" "${repo}/monitor.db"
-  } >"$tmp"
+  } > "$tmp"
   mv -f "$tmp" "$env_file"
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_ok ".env updated: $env_file"
-  else
-    say_ok ".env обновлён: $env_file"
-  fi
+  ok "$(tr env_done) $env_file"
 }
 
-prepare_device() {
-  need_root
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Installing base dependencies..."
-  else
-    say_info "Ставим базовые зависимости..."
-  fi
-  apt-get update
-  apt-get install -y python3 python3-venv python3-pip git sqlite3 curl jq unzip ca-certificates
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_ok "Base environment is ready."
-  else
-    say_ok "Готово."
-  fi
-}
-
-clone_or_update_repo() {
-  local dest="$1"
-  if [[ -d "$dest/.git" ]]; then
-    say_info "Updating repo in $dest"
-    git -C "$dest" fetch --all --prune >/dev/null 2>&1
-    git -C "$dest" reset --hard origin/main >/dev/null 2>&1
-  else
-    say_info "Cloning repo into $dest"
-    mkdir -p "$(dirname "$dest")"
-    git clone "$REPO_URL" "$dest" >/dev/null 2>&1
-  fi
-}
-
-install_monitor() {
+# -----------------------------
+# install / update monitor
+# -----------------------------
+install_monitor(){
   need_root
   local port repo
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    port="$(ask "Uvicorn port" "8080")"
-    repo="$(ask "Install directory for repo" "$REPO_DIR")"
-  else
-    port="$(ask "Порт uvicorn" "8080")"
-    repo="$(ask "Куда ставим репозиторий" "$REPO_DIR")"
-  fi
+  port="$(ask "$(tr ask_uvicorn_port)" "8080")"
+  repo="$(ask "$(tr ask_repo_dir)" "$REPO_DIR")"
 
   wait_port_free "$port"
   maybe_open_firewall_port "$port"
@@ -667,19 +583,14 @@ install_monitor() {
   crlf_fix "$repo/.env" "$repo/example.env" || true
   prompt_monitor_env "$repo"
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Setting up venv and dependencies..."
-  else
-    say_info "Готовлю venv и зависимости..."
-  fi
-
+  info "$(tr venv_setup)"
   python3 -m venv .venv
   source .venv/bin/activate
   python -m pip install --upgrade pip
   pip install -r requirements.txt
   deactivate
 
-  cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
+  cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Gensyn Monitor (Uvicorn)
 Wants=network-online.target
@@ -701,24 +612,21 @@ EOF
   systemctl daemon-reload
   systemctl enable --now ${SERVICE_NAME}.service
 
-  say_ok "$(msg_monitor_running "$port")"
+  ok "$(tr monitor_ok) $port"
 }
 
-update_monitor() {
+update_monitor(){
   need_root
   local repo
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    repo="$(ask "Repo directory" "$REPO_DIR")"
-  else
-    repo="$(ask "Каталог репозитория" "$REPO_DIR")"
-  fi
+  repo="$(ask "$(tr ask_repo_dir)" "$REPO_DIR")"
 
   if [[ ! -d "$repo" ]]; then
-    say_err "$(msg_repo_not_found "$repo")"
+    err "$(tr repo_not_found)"
     return 1
   fi
 
   clone_or_update_repo "$repo"
+
   cd "$repo"
   source .venv/bin/activate
   python -m pip install --upgrade pip
@@ -726,72 +634,53 @@ update_monitor() {
   deactivate
 
   systemctl restart ${SERVICE_NAME}.service
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_ok "Monitor updated and restarted."
-  else
-    say_ok "Монитор обновлён и перезапущен."
-  fi
+  ok "$(tr monitor_upd_done)"
 }
 
-monitor_status() {
+monitor_status(){
   systemctl status ${SERVICE_NAME}.service
 }
-monitor_logs() {
+monitor_logs(){
   journalctl -u ${SERVICE_NAME}.service -n 100 --no-pager
 }
 
-remove_monitor() {
+remove_monitor(){
   need_root
   systemctl disable --now ${SERVICE_NAME}.service || true
   rm -f /etc/systemd/system/${SERVICE_NAME}.service
   systemctl daemon-reload
 
-  local default_repo delete_choice answer
+  local default_repo delete_choice confirm_path
   default_repo="$(current_repo_dir)"
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Current dashboard repo dir: ${default_repo}"
-    read -rp "$(msg_keep_repo_question "$default_repo")" delete_choice || true
-  else
-    say_info "Текущая папка дашборда: ${default_repo}"
-    read -rp "$(msg_keep_repo_question "$default_repo")" delete_choice || true
-  fi
-
+  info "$(tr monitor_dir_now) ${default_repo}"
+  read -rp "$(tr ask_delete_repo) " delete_choice || true
   if [[ "${delete_choice,,}" == "y" || "${delete_choice,,}" == "yes" ]]; then
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      answer="$(ask "Confirm path to delete" "$default_repo")"
+    confirm_path="$(ask "$(tr ask_confirm_rm)" "$default_repo")"
+    if [[ -n "$confirm_path" && -d "$confirm_path" ]]; then
+      rm -rf "$confirm_path"
+      ok "$(tr repo_deleted) $confirm_path"
     else
-      answer="$(ask "Подтверди путь для удаления" "$default_repo")"
-    fi
-    if [[ -n "$answer" && -d "$answer" ]]; then
-      rm -rf "$answer"
-      say_ok "Removed $answer"
-    else
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_info "Directory not found or empty -> skip."
-      else
-        say_info "Каталог не найден или не указан. Пропустил."
-      fi
+      info "$(tr repo_skip)"
     fi
   else
-    say_info "$(msg_repo_kept)"
+    info "$(tr ask_repo_keep)"
   fi
 
-  say_ok "$(msg_monitor_removed)"
+  ok "$(tr monitor_removed)"
 }
 
-########################################
-# Agent: install / reinstall / show / status / logs / remove
-########################################
-
-ensure_repo_for_agent() {
+# -----------------------------
+# agent install / reinstall / status / logs / remove
+# -----------------------------
+ensure_repo_for_agent(){
   local local_agents="$REPO_ROOT/agents/linux"
   if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
     echo "$local_agents"
     return 0
   fi
   if have_cmd git; then
-    say_info "Local agent files not found, cloning into $REPO_DIR"
+    info "agent files not found locally, cloning to $REPO_DIR"
     clone_or_update_repo "$REPO_DIR"
     local_agents="$REPO_DIR/agents/linux"
     if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
@@ -803,8 +692,8 @@ ensure_repo_for_agent() {
   return 1
 }
 
-install_agent_from_raw() {
-  say_info "Downloading agent files from GitHub raw..."
+install_agent_from_raw(){
+  info "$(tr agent_dl)"
   curl -fsSL "$RAW_BASE/agents/linux/gensyn_agent.sh"      -o "$AGENT_BIN"
   curl -fsSL "$RAW_BASE/agents/linux/gensyn-agent.service" -o "$AGENT_SERVICE"
   curl -fsSL "$RAW_BASE/agents/linux/gensyn-agent.timer"   -o "$AGENT_TIMER"
@@ -813,38 +702,25 @@ install_agent_from_raw() {
   crlf_fix "$AGENT_BIN" "$AGENT_SERVICE" "$AGENT_TIMER"
 }
 
-install_agent() {
+install_agent(){
   need_root
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    server="$(ask "Monitor URL (ex http://host:8080)" "${DEFAULT_SERVER_URL:-}")"
-    secret="$(ask "SHARED_SECRET" "${DEFAULT_SHARED_SECRET:-}")"
-    node_default="${DEFAULT_NODE_ID:-$(hostname)-gensyn}"
-    node="$(ask "NODE_ID" "$node_default")"
-    meta="$(ask "META (freeform tag, optional)" "${DEFAULT_META:-}")"
-    eoa="$(ask "GSWARM_EOA (EOA address 0x..., optional)" "${DEFAULT_GSWARM_EOA:-}")"
-    peers="$(ask "GSWARM_PEER_IDS (comma-separated, optional)" "${DEFAULT_GSWARM_PEER_IDS:-}")"
-    tgid="$(ask "GSWARM_TGID (Telegram ID, optional)" "${DEFAULT_GSWARM_TGID:-}")"
-    dashurl="$(ask "DASH_URL (link to this node in dashboard, optional)" "${DEFAULT_DASH_URL:-}")"
-    admin_token="$(ask "ADMIN_TOKEN (/api/admin/delete token, optional)" "${DEFAULT_ADMIN_TOKEN:-}")"
-  else
-    server="$(ask "URL мониторинга (например http://host:8080)" "${DEFAULT_SERVER_URL:-}")"
-    secret="$(ask "SHARED_SECRET" "${DEFAULT_SHARED_SECRET:-}")"
-    node_default="${DEFAULT_NODE_ID:-$(hostname)-gensyn}"
-    node="$(ask "NODE_ID" "$node_default")"
-    meta="$(ask "META (любая подпись узла, можно пусто)" "${DEFAULT_META:-}")"
-    eoa="$(ask "GSWARM_EOA (адрес 0x..., опционально)" "${DEFAULT_GSWARM_EOA:-}")"
-    peers="$(ask "GSWARM_PEER_IDS (через запятую, опционально)" "${DEFAULT_GSWARM_PEER_IDS:-}")"
-    tgid="$(ask "GSWARM_TGID (Telegram ID для off-chain, опц.)" "${DEFAULT_GSWARM_TGID:-}")"
-    dashurl="$(ask "DASH_URL (ссылка на ноду в дашборде, опц.)" "${DEFAULT_DASH_URL:-}")"
-    admin_token="$(ask "ADMIN_TOKEN (для /api/admin/delete, опц.)" "${DEFAULT_ADMIN_TOKEN:-}")"
-  fi
+  server="$(ask "$(tr ask_server)" "${DEFAULT_SERVER_URL:-}")"
+  secret="$(ask "$(tr ask_secret)" "${DEFAULT_SHARED_SECRET:-}")"
+  node_default="${DEFAULT_NODE_ID:-$(hostname)-gensyn}"
+  node_id="$(ask "$(tr ask_node)" "$node_default")"
+  meta="$(ask "$(tr ask_meta)" "${DEFAULT_META:-}")"
+  eoa="$(ask "$(tr ask_eoa)" "${DEFAULT_GSWARM_EOA:-}")"
+  peers="$(ask "$(tr ask_peers)" "${DEFAULT_GSWARM_PEER_IDS:-}")"
+  tgid="$(ask "$(tr ask_tgid)" "${DEFAULT_GSWARM_TGID:-}")"
+  dashurl="$(ask "$(tr ask_dashurl)" "${DEFAULT_DASH_URL:-}")"
+  admin_token="$(ask "$(tr ask_admin_token)" "${DEFAULT_ADMIN_TOKEN:-}")"
 
   local agents_dir
   agents_dir="$(ensure_repo_for_agent || true)"
 
   if [[ -n "$agents_dir" ]]; then
-    say_info "Using agent files from: $agents_dir"
+    info "$(tr agent_using_local) $agents_dir"
     install -m0755 "$agents_dir/gensyn_agent.sh" "$AGENT_BIN"
     install -m0644 "$agents_dir/gensyn-agent.service" "$AGENT_SERVICE"
     install -m0644 "$agents_dir/gensyn-agent.timer"   "$AGENT_TIMER"
@@ -856,7 +732,7 @@ install_agent() {
   {
     printf 'SERVER_URL=%s\n'        "$(shell_quote "$server")"
     printf 'SHARED_SECRET=%s\n'     "$(shell_quote "$secret")"
-    printf 'NODE_ID=%s\n'           "$(shell_quote "$node")"
+    printf 'NODE_ID=%s\n'           "$(shell_quote "$node_id")"
     printf 'META=%s\n'              "$(shell_quote "$meta")"
     printf 'GSWARM_EOA=%s\n'        "$(shell_quote "$eoa")"
     printf 'GSWARM_PEER_IDS=%s\n'   "$(shell_quote "$peers")"
@@ -871,44 +747,27 @@ install_agent() {
   systemctl daemon-reload
   systemctl enable --now "$(basename "$AGENT_TIMER")"
 
-  say_ok "$(msg_agent_enabled "$(basename "$AGENT_TIMER")")"
-
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Agent config: $AGENT_ENV"
-  else
-    say_info "Конфиг агента: $AGENT_ENV"
-  fi
+  ok "$(tr agent_timer_on) $(basename "$AGENT_TIMER")"
+  info "$(tr agent_cfg_path) $AGENT_ENV"
 
   if [[ -n "$server" ]]; then
-    local endpoint="${server%/}/api/gswarm/check?include_nodes=true&send=false"
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      say_info "Triggering initial G-Swarm collection -> $endpoint"
-    else
-      say_info "Дёргаю начальный сбор G-Swarm -> $endpoint"
-    fi
+    endpoint="${server%/}/api/gswarm/check?include_nodes=true&send=false"
+    info "$(tr agent_initial_push) $endpoint"
     if curl -fsS -X POST "$endpoint" -d '' >/dev/null 2>&1; then
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_ok "Initial G-Swarm sync requested."
-      else
-        say_ok "Запросил первичный сбор G-Swarm."
-      fi
+      ok "$(tr agent_initial_ok)"
     else
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_warn "G-Swarm API call failed or skipped."
-      else
-        say_warn "Не получилось дернуть G-Swarm API, пропускаю."
-      fi
+      warn "$(tr agent_initial_fail)"
     fi
   fi
 
-  # reload agent service so it reads AUTO_KILL_EMPTY_SCREEN=false
+  # перезапустить сервис агента, чтоб он перечитал AUTO_KILL_EMPTY_SCREEN=false
   systemctl restart "$(basename "$AGENT_SERVICE")" || true
 }
 
-reinstall_agent() {
+reinstall_agent(){
   need_root
-
   local prev_server="" prev_node="" prev_admin="" prev_secret="" prev_meta="" prev_eoa="" prev_peers="" prev_tgid="" prev_dash=""
+
   if [[ -f "$AGENT_ENV" ]]; then
     set +u
     source "$AGENT_ENV"
@@ -919,8 +778,8 @@ reinstall_agent() {
     prev_meta="${META:-}"
     prev_eoa="${GSWARM_EOA:-}"
     prev_peers="${GSWARM_PEER_IDS:-}"
-    prev_dash="${DASH_URL:-}"
     prev_tgid="${GSWARM_TGID:-}"
+    prev_dash="${DASH_URL:-}"
     set -u
   fi
 
@@ -952,50 +811,36 @@ reinstall_agent() {
   fi
 
   if [[ -n "$prev_server" && -n "$prev_admin" && -n "$prev_node" && "$prev_node" != "$new_node" ]]; then
-    local endpoint="${prev_server%/}/api/admin/delete"
-    local payload
+    endpoint="${prev_server%/}/api/admin/delete"
     payload=$(json_string "$prev_node")
     if curl -fsS -X POST "$endpoint" \
          -H "Authorization: Bearer ${prev_admin}" \
          -H "Content-Type: application/json" \
          -d "{\"node_id\":${payload}}" >/dev/null 2>&1; then
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_ok "Old node_id ${prev_node} removed from monitor."
-      else
-        say_ok "Старый node_id ${prev_node} выпилен из монитора."
-      fi
+      ok "$(tr agent_old_removed)"
     else
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_warn "Failed to remove old node_id ${prev_node} from monitor."
-      else
-        say_warn "Не смог убрать старый node_id ${prev_node} с монитора."
-      fi
+      warn "$(tr agent_old_fail)"
     fi
   fi
 }
 
-show_agent_env() {
+show_agent_env(){
   if [[ -f "$AGENT_ENV" ]]; then
     echo "== $AGENT_ENV =="
     cat "$AGENT_ENV"
   else
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      say_warn "$AGENT_ENV not found."
-    else
-      say_warn "Файл $AGENT_ENV не найден."
-    fi
+    warn "$(tr agent_env_missing)"
   fi
 }
 
-agent_status() {
+agent_status(){
   systemctl status "$(basename "$AGENT_TIMER")" "$(basename "$AGENT_SERVICE")"
 }
-
-agent_logs() {
+agent_logs(){
   journalctl -u "$(basename "$AGENT_SERVICE")" -n 100 --no-pager
 }
 
-remove_agent() {
+remove_agent(){
   need_root
   local server_env="" node_env="" admin_env=""
   if [[ -f "$AGENT_ENV" ]]; then
@@ -1008,54 +853,26 @@ remove_agent() {
   fi
 
   systemctl disable --now "$(basename "$AGENT_TIMER")" "$(basename "$AGENT_SERVICE")" || true
-  rm -f "$AGENT_TIMER" "$AGENT_SERVICE"
-  rm -f "$AGENT_BIN" "$AGENT_ENV"
+  rm -f "$AGENT_TIMER" "$AGENT_SERVICE" "$AGENT_BIN" "$AGENT_ENV"
   systemctl daemon-reload
 
   if [[ -n "$server_env" && -n "$node_env" && -n "$admin_env" ]]; then
-    local endpoint="${server_env%/}/api/admin/delete"
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      say_info "Removing node from monitor -> $endpoint"
-    else
-      say_info "Удаляю ноду из монитора -> $endpoint"
-    fi
-    if curl -fsS -X POST "$endpoint" \
-         -H "Authorization: Bearer ${admin_env}" \
-         -H "Content-Type: application/json" \
-         -d "{\"node_id\":\"${node_env}\"}" >/dev/null 2>&1; then
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_ok "Node ${node_env} removed from monitor."
-      else
-        say_ok "Нода ${node_env} удалена с дашборда."
-      fi
-    else
-      if [[ "$LANG_MODE" == "EN" ]]; then
-        say_warn "Could not call /api/admin/delete (skipped)."
-      else
-        say_warn "Не получилось вызвать /api/admin/delete, пропущено."
-      fi
-    fi
+    info "$(tr rm_agent_api) $server_env"
+    curl -fsS -X POST "${server_env%/}/api/admin/delete" \
+      -H "Authorization: Bearer ${admin_env}" \
+      -H "Content-Type: application/json" \
+      -d "{\"node_id\":\"${node_env}\"}" >/dev/null 2>&1 || true
   fi
 
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_ok "Agent removed."
-  else
-    say_ok "Агент удалён."
-  fi
+  ok "$(tr rm_agent_done)"
 }
 
-########################################
-# Autorestart (watchdog + launcher)
-########################################
-
-install_autorestart() {
+# -----------------------------
+# autorestart (watchdog + launcher)
+# -----------------------------
+install_autorestart(){
   need_root
-
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Installing autorestart (watchdog + launcher)..."
-  else
-    say_info "Ставлю авторестарт (watchdog + launcher)..."
-  fi
+  info "$(tr autorestart_install)"
 
   curl -fsSL "$RAW_BASE/agents/linux/gensyn-watchdog.sh"              -o "$WATCHDOG_BIN"
   curl -fsSL "$RAW_BASE/agents/linux/gensyn-watchdog.service"         -o "$WATCHDOG_SERVICE"
@@ -1065,74 +882,63 @@ install_autorestart() {
 
   chmod 0755 "$WATCHDOG_BIN" "$LAUNCHER_BIN"
   chmod 0644 "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$LAUNCHER_SERVICE"
-
   crlf_fix "$WATCHDOG_BIN" "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$LAUNCHER_BIN" "$LAUNCHER_SERVICE"
 
+  # лог роя
   if [[ ! -f "$SWARM_LOG" ]]; then
     touch "$SWARM_LOG"
     chmod 0644 "$SWARM_LOG"
   fi
 
-  # make sure agent won't kill screen "gensyn"
+  # агент не должен убивать пустую screen gensyn
   if [[ -f "$AGENT_ENV" ]]; then
     if ! grep -q '^AUTO_KILL_EMPTY_SCREEN=' "$AGENT_ENV" 2>/dev/null; then
       echo "AUTO_KILL_EMPTY_SCREEN='false'" >> "$AGENT_ENV"
     else
-      sed -i 's/^AUTO_KILL_EMPTY_SCREEN=.*/AUTO_KILL_EMPTY_SCREEN='"'"'false'"'"'/' "$AGENT_ENV"
+      sed -i "s/^AUTO_KILL_EMPTY_SCREEN=.*/AUTO_KILL_EMPTY_SCREEN='false'/" "$AGENT_ENV"
     fi
   else
-    {
-      echo "AUTO_KILL_EMPTY_SCREEN='false'"
-    } > "$AGENT_ENV"
+    echo "AUTO_KILL_EMPTY_SCREEN='false'" > "$AGENT_ENV"
     chmod 0644 "$AGENT_ENV"
   fi
 
   systemctl daemon-reload
 
+  # агент перечитывает env
   systemctl restart "$(basename "$AGENT_SERVICE")" || true
+  # launcher создает screen gensyn и запускает рой
   systemctl enable --now "$(basename "$LAUNCHER_SERVICE")"
+  # watchdog.timer периодически проверяет статус и если DOWN рестартит launcher
   systemctl enable --now "$(basename "$WATCHDOG_TIMER")"
 
-  say_ok "$(msg_autorestart_installed)"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Screen session name: gensyn (check: screen -ls / attach: screen -r gensyn)"
-  else
-    say_info "screen-сессия будет называться gensyn (проверка: screen -ls / заход: screen -r gensyn)"
-  fi
+  ok "$(tr autorestart_ok)"
+  info "$(tr autorestart_hint)"
 }
 
-watchdog_logs() {
+watchdog_logs(){
   need_root
   echo
-  msg_watchdog_live
+  echo "$(tr autorestart_logs_live)"
   echo
   journalctl -u "$(basename "$WATCHDOG_SERVICE")" -f --no-pager || true
 
   echo
-  msg_swarm_tail_head
-  tail -n 100 "$SWARM_LOG" 2>/dev/null || {
-    if [[ "$LANG_MODE" == "EN" ]]; then
-      echo "[i] swarm log empty or missing"
-    else
-      echo "[i] лог роя пустой или ещё не создан"
-    fi
-  }
+  echo "$(tr autorestart_logs_tail)"
+  if ! tail -n 100 "$SWARM_LOG" 2>/dev/null; then
+    echo "$(tr swarmlog_empty)"
+  fi
   echo
 }
 
-remove_autorestart() {
+remove_autorestart(){
   need_root
-
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Removing autorestart (watchdog + launcher)..."
-  else
-    say_info "Убираю авторестарт (watchdog + launcher)..."
-  fi
+  info "$(tr autorestart_rm)"
 
   systemctl disable --now "$(basename "$WATCHDOG_TIMER")" 2>/dev/null || true
   systemctl disable --now "$(basename "$WATCHDOG_SERVICE")" 2>/dev/null || true
   systemctl disable --now "$(basename "$LAUNCHER_SERVICE")" 2>/dev/null || true
 
+  # гасим screen gensyn
   screen -S gensyn -X quit || true
 
   rm -f "$WATCHDOG_TIMER" "$WATCHDOG_SERVICE" "$WATCHDOG_BIN"
@@ -1140,49 +946,46 @@ remove_autorestart() {
 
   systemctl daemon-reload
 
-  say_ok "$(msg_autorestart_removed)"
-  if [[ "$LANG_MODE" == "EN" ]]; then
-    say_info "Swarm log left at $SWARM_LOG (remove manually if you want)."
-  else
-    say_info "Лог роя оставил: $SWARM_LOG. Сам решай, удалять или нет."
-  fi
+  ok "$(tr autorestart_rm_ok)"
+  info "$(tr swarm_left) $SWARM_LOG"
 }
 
-########################################
-# Language switch
-########################################
+# -----------------------------
+# Menu
+# -----------------------------
+main_menu(){
+  choose_lang
+  info "$(tr need_root)"; hr
 
-choose_lang() {
-  # default RU, offer to switch to EN
-  echo
-  echo "--------------------------------"
-  echo "RU / EN?"
-  echo "По умолчанию всё будет на русском."
-  echo "If you want English prompts, type: en"
-  echo "--------------------------------"
-  read -rp "> " lang || true
-
-  case "${lang,,}" in
-    en|eng|english)
-      LANG_MODE="EN"
-      ;;
-    *)
-      LANG_MODE="RU"
-      ;;
-  esac
-}
-
-########################################
-# Menu / Main
-########################################
-
-main_menu_loop() {
   while true; do
-    t_menu
-    t_choose_option
-    read choice || true
-    case "${choice:-}" in
-      1)  prepare_device ;;
+    clear; logo; hr
+    echo -e "${cBold}${cM}$(tr menu_title)${c0} ${cDim}(v${SCRIPT_VERSION})${c0}\n"
+
+    echo "1)  $(tr m1)"
+    echo "2)  $(tr m2)"
+    echo "3)  $(tr m3)"
+    echo "4)  $(tr m4)"
+    echo "5)  $(tr m5)"
+    echo "6)  $(tr m6)"
+    hr
+    echo "7)  $(tr m7)"
+    echo "8)  $(tr m8)"
+    echo "9)  $(tr m9)"
+    echo "10) $(tr m10)"
+    echo "11) $(tr m11)"
+    echo "12) $(tr m12)"
+    hr
+    echo "13) $(tr m13)"
+    echo "14) $(tr m14)"
+    echo "15) $(tr m15)"
+    hr
+    echo "16) $(tr m16)"
+    echo "17) $(tr m17)"
+    hr
+
+    read -rp "> " ch
+    case "${ch:-}" in
+      1)  prepare_deps ;;
       2)  install_monitor ;;
       3)  update_monitor ;;
       4)  monitor_status ;;
@@ -1197,22 +1000,14 @@ main_menu_loop() {
       13) install_autorestart ;;
       14) watchdog_logs ;;
       15) remove_autorestart ;;
-      0)  exit 0 ;;
-      *)
-        if [[ "$LANG_MODE" == "EN" ]]; then
-          say_warn "Unknown option"
-        else
-          say_warn "Неизвестный пункт"
-        fi
-        ;;
+      16) choose_lang ;;
+      17) exit 0 ;;
+      *)  ;;
     esac
+
+    echo -e "\n$(tr press_enter)"
+    read -r
   done
 }
 
-main() {
-  t_banner
-  choose_lang
-  main_menu_loop
-}
-
-main "$@"
+main_menu
