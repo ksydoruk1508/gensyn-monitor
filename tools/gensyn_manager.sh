@@ -117,7 +117,7 @@ tr(){
 
       port_busy)          echo "Port is already in use. Pick another port or stop that process:";;
       fw_q)               echo "Open this port in firewall (ufw/firewalld)? (y/N):";;
-      fw_inactive)        echo "ufw is installed but inactive -> skipping rule."; ;
+      fw_inactive)        echo "ufw is installed but inactive -> skipping rule.";;
       fw_skip)            echo "Skipping firewall config.";;
 
       repo_not_found)     echo "Repo not found. Install monitor first.";;
