@@ -191,7 +191,7 @@ tr(){
       m15) echo "Remove autorestart";;
 
       m16) echo "Change language";;
-      m17) echo "Exit";;
+      m0) echo "Exit";;
     esac
   else
     case "$k" in
@@ -301,7 +301,7 @@ tr(){
       m15) echo "Удалить авторестарт";;
 
       m16) echo "Сменить язык / Change language";;
-      m17) echo "Выход";;
+      m0) echo "Выход";;
     esac
   fi
 }
