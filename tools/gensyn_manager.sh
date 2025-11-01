@@ -638,11 +638,16 @@ install_autorestart() {
 
 watchdog_logs() {
   need_root
-  echo "== journalctl gensyn-watchdog.service (последние 100 строк) =="
-  journalctl -u "$(basename "$WATCHDOG_SERVICE")" -n 100 --no-pager || true
+  echo "=== journalctl -u gensyn-watchdog.service -f ==="
+  echo "Нажми Ctrl+C чтобы выйти обратно в меню."
   echo
-  echo "== tail $SWARM_LOG (вывод ноды / run_rl_swarm.sh) =="
+  # поток логов вотчдога (перезапуски, DOWN/UP, рестарты лаунчера)
+  journalctl -u "$(basename "$WATCHDOG_SERVICE")" -f --no-pager || true
+
+  echo
+  echo "=== Хвост /var/log/gensyn-swarm.log (работа роя внутри screen gensyn) ==="
   tail -n 100 "$SWARM_LOG" 2>/dev/null || echo "[i] Лог $SWARM_LOG пока пуст или не существует."
+  echo
 }
 
 remove_autorestart() {
