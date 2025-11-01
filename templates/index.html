@@ -33,6 +33,10 @@
     table { border-collapse: collapse; width: 100%; background: var(--card-bg); border-radius: 12px; overflow: hidden; }
     th, td { border-bottom: 1px solid var(--border); padding: 10px; text-align: left; vertical-align: middle; }
     th { font-weight: 600; background: var(--card-bg); }
+    th.sortable { cursor: pointer; user-select: none; position: relative; padding-right: 20px; }
+    th.sortable::after { content: '⇅'; font-size: 11px; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); opacity: .35; }
+    th.sortable.sort-asc::after { content: '↑'; opacity: .9; }
+    th.sortable.sort-desc::after { content: '↓'; opacity: .9; }
     code { background: rgba(127,127,127,.12); padding: 2px 6px; border-radius: 6px; }
     body.dark code { background: rgba(255,255,255,.08); }
     .UP { color: #1a7f37; font-weight: 700; }
@@ -73,9 +77,9 @@
   <table id="tbl">
     <thead>
       <tr>
-        <th>Node ID</th>
+        <th id="nodeIdHeader" class="sortable">Node ID</th>
         <th>IP</th>
-        <th>Статус</th>
+        <th id="statusHeader" class="sortable">Статус</th>
         <th>Последний heartbeat</th>
         <th>Возраст, сек</th>
         <th>G-Swarm</th>
@@ -91,7 +95,6 @@
     const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
     const fmtTs = (ts) => new Date(ts * 1000).toLocaleString();
-    const shortPeer = (pid = '') => (pid.length > 8 ? `${pid.slice(0, 3)}...${pid.slice(-3)}` : pid);
     const esc = (str = '') => String(str).replace(/[&<>"']/g, (ch) => escapeMap[ch] || ch);
     const formatCheckTime = (str) => {
       if (!str) return '';
@@ -102,7 +105,117 @@
 
     const tbody = document.querySelector('#tbl tbody');
     const updatedAtEl = document.getElementById('updatedAt');
+    const nodeIdHeader = document.getElementById('nodeIdHeader');
+    const statusHeader = document.getElementById('statusHeader');
     const expandedNodes = new Set();
+    let nodes = [];
+    let nodeSortOrder = null;      // 'asc' | 'desc' | null
+    let statusSortOrder = null;    // 'down-first' | 'up-first' | null
+
+    function sortByNodeId(a, b, dir = 1) {
+      const aMatch = a.node_id.match(/\d+/);
+      const bMatch = b.node_id.match(/\d+/);
+      // если есть числа в node_id - сортируем по числу
+      if (aMatch && bMatch) {
+        const aNum = parseInt(aMatch[0], 10);
+        const bNum = parseInt(bMatch[0], 10);
+        return dir * (aNum - bNum);
+      }
+      // иначе строковое сравнение
+      return dir * a.node_id.localeCompare(b.node_id);
+    }
+
+    function sortNodes(data) {
+      // 1) Явная сортировка по статусу, если пользователь кликнул колонку "Статус"
+      if (statusSortOrder) {
+        const desired = statusSortOrder === 'down-first' ? ['DOWN', 'UP'] : ['UP', 'DOWN'];
+        return data.sort((a, b) => {
+          const ia = desired.indexOf(a.computed);
+          const ib = desired.indexOf(b.computed);
+          if (ia !== ib) return ia - ib;
+          // тай-брейк по node_id возрастанию
+          return sortByNodeId(a, b, 1);
+        });
+      }
+
+      // 2) Явная сортировка по Node ID (клик по заголовку Node ID)
+      if (nodeSortOrder === 'asc' || nodeSortOrder === 'desc') {
+        const dir = nodeSortOrder === 'asc' ? 1 : -1;
+        return data.sort((a, b) => sortByNodeId(a, b, dir));
+      }
+
+      // 3) Сортировка по умолчанию: DOWN выше, затем по node_id
+      return data.sort((a, b) => {
+        if ((a.computed === 'DOWN') === (b.computed === 'DOWN')) {
+          return sortByNodeId(a, b, 1);
+        }
+        return a.computed === 'DOWN' ? -1 : 1;
+      });
+    }
+
+    function renderNodes() {
+      let data = sortNodes([...nodes]);
+
+      tbody.innerHTML = '';
+
+      // сброс визуальных индикаторов сортировки
+      nodeIdHeader.classList.remove('sort-asc', 'sort-desc');
+      statusHeader.classList.remove('sort-asc', 'sort-desc');
+
+      // отметить активную сортировку
+      if (nodeSortOrder === 'asc') nodeIdHeader.classList.add('sort-asc');
+      else if (nodeSortOrder === 'desc') nodeIdHeader.classList.add('sort-desc');
+
+      // для статуса используем: up-first => sort-asc, down-first => sort-desc
+      if (statusSortOrder === 'up-first') statusHeader.classList.add('sort-asc');
+      else if (statusSortOrder === 'down-first') statusHeader.classList.add('sort-desc');
+
+      for (const n of data) {
+        const tr = document.createElement('tr');
+        tr.classList.add('node-row');
+        const metaFull = (n.meta || '').toString();
+        const metaShort = metaFull.slice(0, 80);
+        const alertChecked = n.gswarm_alert === false ? '' : ' checked';
+        const allowAlerts = Boolean(ADMIN_TOKEN);
+        const alertDisabled = allowAlerts ? '' : ' disabled';
+        const alertTitle = allowAlerts ? 'Toggle Telegram alerts' : 'Alerts disabled (ADMIN_TOKEN missing)';
+        tr.innerHTML = `
+          <td><code>${esc(n.node_id)}</code></td>
+          <td><code>${esc(n.ip || '')}</code></td>
+          <td class="${n.computed}">${n.computed}</td>
+          <td class="muted">${fmtTs(n.last_seen)}</td>
+          <td>${n.age_sec}</td>
+          <td>${renderGswarmSummary(n.gswarm)}</td>
+          <td class="alert-cell"><input type="checkbox" class="alert-toggle"${alertChecked}${alertDisabled} title="${esc(alertTitle)}"></td>
+          <td><span class="pill" title="${esc(metaFull)}">${esc(metaShort)}</span></td>
+        `;
+
+        const detail = document.createElement('tr');
+        detail.className = 'detail-row hidden';
+        detail.innerHTML = `<td colspan="8">${renderGswarmDetail(n.gswarm)}</td>`;
+
+        tr.addEventListener('click', () => {
+          if (detail.classList.toggle('hidden')) expandedNodes.delete(n.node_id);
+          else expandedNodes.add(n.node_id);
+        });
+
+        tbody.appendChild(tr);
+        tbody.appendChild(detail);
+        if (expandedNodes.has(n.node_id)) detail.classList.remove('hidden');
+
+        const toggle = tr.querySelector('.alert-toggle');
+        if (toggle) {
+          toggle.addEventListener('click', (ev) => ev.stopPropagation());
+          toggle.addEventListener('change', (ev) => {
+            if (!ADMIN_TOKEN) {
+              ev.target.checked = !ev.target.checked;
+              return;
+            }
+            setAlert(n.node_id, ev.target.checked, ev.target);
+          });
+        }
+      }
+    }
 
     function renderGswarmSummary(gs) {
       if (!gs) return '<span class="muted">n/a</span>';
@@ -125,9 +238,7 @@
     }
 
     function renderGswarmDetail(gs) {
-      if (!gs) {
-        return '<div class="muted">G-Swarm данные отсутствуют</div>';
-      }
+      if (!gs) return '<div class="muted">G-Swarm данные отсутствуют</div>';
       const stats = gs.stats || {};
       const totals = stats.totals || {};
       const per = stats.per_peer || {};
@@ -144,21 +255,19 @@
           </div>
         `;
       }).join('');
-      const missing = stats.missing_peers && stats.missing_peers.length
+      const missing = stats.missing_peers?.length
         ? `<div class="warn">Missing peers: ${stats.missing_peers.map((p) => esc(p)).join(', ')}</div>`
         : '';
       const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
-      const eoaVal = gs.eoa || stats.eoa;
-      const tgidVal = gs.tgid || stats.tgid;
-      const tgid = tgidVal ? `<div class="small">TG ID: <code>${esc(tgidVal)}</code></div>` : '';
-      const eoa = eoaVal ? `<div class="small">EOA: <code>${esc(eoaVal)}</code></div>` : '';
+      const eoa = gs.eoa || stats.eoa;
+      const tgid = gs.tgid || stats.tgid;
       return `
         <div class="gswarm-card">
           <div class="gswarm-head">Wins ${totals.wins ?? 0} | Rewards ${totals.rewards ?? 0}</div>
           <div class="peer-list">${peerCards || '<span class="muted">Peers не найдены</span>'}</div>
           ${missing}
-          ${eoa}
-          ${tgid}
+          ${eoa ? `<div class="small">EOA: <code>${esc(eoa)}</code></div>` : ''}
+          ${tgid ? `<div class="small">TG ID: <code>${esc(tgid)}</code></div>` : ''}
           ${last ? `<div class="small">Last: ${esc(last)}</div>` : ''}
         </div>
       `;
@@ -168,21 +277,14 @@
       try {
         checkbox.disabled = true;
         const headers = { 'Content-Type': 'application/json' };
-        if (ADMIN_TOKEN) {
-          headers['Authorization'] = `Bearer ${ADMIN_TOKEN}`;
-        }
+        if (ADMIN_TOKEN) headers['Authorization'] = `Bearer ${ADMIN_TOKEN}`;
         const res = await fetch('/api/nodes/gswarm/alert', {
           method: 'POST',
           headers,
           body: JSON.stringify({ node_id: nodeId, enabled }),
         });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
         const payload = await res.json();
-        if (!payload.ok) {
-          throw new Error(payload.error || 'unknown error');
-        }
+        if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
       } catch (err) {
         checkbox.checked = !enabled;
         alert('Не удалось обновить настройки Telegram: ' + err);
@@ -195,62 +297,8 @@
       try {
         const res = await fetch('/api/nodes', { cache: 'no-store' });
         const data = await res.json();
-        data.sort((a, b) => (a.computed === 'DOWN') === (b.computed === 'DOWN')
-          ? a.node_id.localeCompare(b.node_id)
-          : (a.computed === 'DOWN' ? -1 : 1));
-
-        tbody.innerHTML = '';
-        for (const n of data) {
-          const tr = document.createElement('tr');
-          tr.classList.add('node-row');
-          const metaFull = (n.meta || '').toString();
-          const metaShort = metaFull.slice(0, 80);
-          const alertChecked = n.gswarm_alert === false ? '' : ' checked';
-          const allowAlerts = Boolean(ADMIN_TOKEN);
-          const alertDisabled = allowAlerts ? '' : ' disabled';
-          const alertTitle = allowAlerts ? 'Toggle Telegram alerts' : 'Alerts disabled (ADMIN_TOKEN missing)';
-          tr.innerHTML = `
-            <td><code>${esc(n.node_id)}</code></td>
-            <td><code>${esc(n.ip || '')}</code></td>
-            <td class="${n.computed}">${n.computed}</td>
-            <td class="muted">${fmtTs(n.last_seen)}</td>
-            <td>${n.age_sec}</td>
-            <td>${renderGswarmSummary(n.gswarm)}</td>
-            <td class="alert-cell"><input type="checkbox" class="alert-toggle"${alertChecked}${alertDisabled} title="${esc(alertTitle)}"></td>
-            <td><span class="pill" title="${esc(metaFull)}">${esc(metaShort)}</span></td>
-          `;
-
-          const detail = document.createElement('tr');
-          detail.className = 'detail-row hidden';
-          detail.innerHTML = `<td colspan="8">${renderGswarmDetail(n.gswarm)}</td>`;
-
-          tr.addEventListener('click', () => {
-            if (detail.classList.toggle('hidden')) {
-              expandedNodes.delete(n.node_id);
-            } else {
-              expandedNodes.add(n.node_id);
-            }
-          });
-
-          tbody.appendChild(tr);
-          tbody.appendChild(detail);
-          if (expandedNodes.has(n.node_id)) {
-            detail.classList.remove('hidden');
-          }
-
-          const toggle = tr.querySelector('.alert-toggle');
-          if (toggle) {
-            toggle.addEventListener('click', (ev) => ev.stopPropagation());
-            toggle.addEventListener('change', (ev) => {
-              if (!ADMIN_TOKEN) {
-                ev.target.checked = !ev.target.checked;
-                return;
-              }
-              setAlert(n.node_id, ev.target.checked, ev.target);
-            });
-          }
-        }
-
+        nodes = Array.isArray(data) ? data : [];
+        renderNodes();
         updatedAtEl.textContent = 'Updated: ' + new Date().toLocaleTimeString();
       } catch (e) {
         updatedAtEl.textContent = 'Failed to refresh data';
@@ -258,6 +306,21 @@
     }
 
     document.getElementById('refreshBtn').addEventListener('click', load);
+
+    // клик по Node ID - сортировка по id, сбрасываем сортировку по статусу
+    nodeIdHeader.addEventListener('click', () => {
+      nodeSortOrder = nodeSortOrder === 'asc' ? 'desc' : 'asc';
+      statusSortOrder = null;
+      renderNodes();
+    });
+
+    // клик по Статус - первый клик: DOWN сверху, второй клик: UP сверху, затем циклим
+    statusHeader.addEventListener('click', () => {
+      statusSortOrder = statusSortOrder === 'down-first' ? 'up-first' : 'down-first';
+      nodeSortOrder = null; // сбрасываем сортировку по Node ID
+      renderNodes();
+    });
+
     const themeBtn = document.getElementById('themeBtn');
     function applyTheme(theme) {
       document.body.classList.toggle('dark', theme === 'dark');
