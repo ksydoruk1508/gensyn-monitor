@@ -1,0 +1,16 @@
+[Unit]
+Description=Gensyn swarm watchdog
+
+[Service]
+Type=oneshot
+User=root
+Environment=HOME=/root
+Environment=USER=root
+Environment=LOGNAME=root
+Environment=SHELL=/bin/bash
+Environment=TERM=xterm-256color
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/gensyn-watchdog.sh
+
+[Install]
+WantedBy=multi-user.target
