@@ -2,23 +2,38 @@
 #
 # Gensyn Monitor helper.
 # Готовит сервер, ставит/обновляет/удаляет мониторинг и агента,
-# показывает статус/логи. Поддерживает DASH_URL для нод и интерактивное
-# заполнение .env для дашборда.
+# ставит/удаляет авторестарт ноды (watchdog+launcher),
+# показывает статус/логи.
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-REPO_URL="https://github.com/k2wGG/gensyn-monitor.git"
+
+# ВАЖНО: этот URL и RAW_BASE должны указывать на твой репозиторий.
+# На скрине у тебя репозиторий ksydoruk1508/gensyn-monitor,
+# в исходнике был k2wGG/gensyn-monitor. Я оставлю переменные так же как у тебя сейчас:
+REPO_URL="https://github.com/ksydoruk1508/gensyn-monitor.git"
 REPO_DIR="/opt/gensyn-monitor"
-RAW_BASE="https://raw.githubusercontent.com/k2wGG/gensyn-monitor/main"
+RAW_BASE="https://raw.githubusercontent.com/ksydoruk1508/gensyn-monitor/main"
 
 SERVICE_NAME="gensyn-monitor"
 
+# агент
 AGENT_BIN="/usr/local/bin/gensyn_agent.sh"
 AGENT_ENV="/etc/gensyn-agent.env"
 AGENT_SERVICE="/etc/systemd/system/gensyn-agent.service"
 AGENT_TIMER="/etc/systemd/system/gensyn-agent.timer"
+
+# автохиллер
+WATCHDOG_BIN="/usr/local/bin/gensyn-watchdog.sh"
+WATCHDOG_SERVICE="/etc/systemd/system/gensyn-watchdog.service"
+WATCHDOG_TIMER="/etc/systemd/system/gensyn-watchdog.timer"
+
+LAUNCHER_BIN="/usr/local/bin/gensyn-screen-launcher.sh"
+LAUNCHER_SERVICE="/etc/systemd/system/gensyn-screen-launcher.service"
+
+SWARM_LOG="/var/log/gensyn-swarm.log"
 
 display_logo() {
   cat <<'EOF'
@@ -65,7 +80,6 @@ ask() {
   printf '%s' "${value:-}"
 }
 
-# Безопасное квотирование для .env (python-dotenv сам парсит без кавычек)
 shell_quote() {
   if have_cmd python3; then
     python3 - "$1" <<'PY'
@@ -108,7 +122,7 @@ wait_port_free() {
   local port="$1"
   if ss -ltn "( sport = :$port )" | grep -q ":$port"; then
     echo "[!] Порт $port занят:"
-    ss -ltnp | grep ":$port" || true
+    ss -ltnp | grep -q ":$port" && ss -ltnp | grep ":$port" || true
     echo "    Выберите другой порт или остановите процесс, занимающий порт."
     exit 1
   fi
@@ -183,8 +197,6 @@ ensure_repo_for_agent() {
   return 1
 }
 
-# ── Вспомогательные для интерактива .env ─────────────────────────────────────
-
 is_number() { [[ "$1" =~ ^[0-9]+$ ]] ; }
 
 json_validate() {
@@ -203,7 +215,6 @@ except Exception:
 PY
     return $?
   else
-    # Нет валидатора — не блокируем установку
     return 0
   fi
 }
@@ -220,7 +231,6 @@ prompt_monitor_env() {
 
   echo "[*] Настраиваем переменные окружения (.env)"
 
-  # Значения по умолчанию через экспорт DEFAULT_*
   local _bot="${DEFAULT_TELEGRAM_BOT_TOKEN:-}"
   local _chat="${DEFAULT_TELEGRAM_CHAT_ID:-}"
   local _shared="${DEFAULT_SHARED_SECRET:-}"
@@ -415,6 +425,8 @@ install_agent() {
     printf 'GSWARM_TGID=%s\n'       "$(shell_quote "$tgid")"
     printf 'DASH_URL=%s\n'          "$(shell_quote "$dashurl")"
     printf 'ADMIN_TOKEN=%s\n'       "$(shell_quote "$admin_token")"
+    # очень важно: агент не должен убивать наш screen gensyn
+    printf "AUTO_KILL_EMPTY_SCREEN='false'\n"
   } >"$AGENT_ENV"
   chmod 0644 "$AGENT_ENV"
   crlf_fix "$AGENT_ENV"
@@ -433,6 +445,9 @@ install_agent() {
       echo "[!] Не удалось вызвать G-Swarm API (пропущено)." >&2
     fi
   fi
+
+  # после изменения env — рестарт сервиса агента, чтобы он заново подхватил AUTO_KILL_EMPTY_SCREEN=false
+  systemctl restart "$(basename "$AGENT_SERVICE")" || true
 }
 
 reinstall_agent() {
@@ -461,8 +476,8 @@ reinstall_agent() {
   export DEFAULT_META="${prev_meta}"
   export DEFAULT_GSWARM_EOA="${prev_eoa}"
   export DEFAULT_GSWARM_PEER_IDS="${prev_peers}"
-  export DEFAULT_DASH_URL="${prev_dash}"
   export DEFAULT_GSWARM_TGID="${prev_tgid}"
+  export DEFAULT_DASH_URL="${prev_dash}"
   export DEFAULT_ADMIN_TOKEN="${prev_admin}"
 
   install_agent
@@ -565,6 +580,97 @@ remove_agent() {
   echo "[+] Агент удалён"
 }
 
+###############################################################################
+#           АВТОРЕСТАРТ НОДЫ (watchdog + screen-launcher)
+###############################################################################
+
+install_autorestart() {
+  need_root
+  echo "[*] Устанавливаю автостарт ноды (watchdog + launcher)…"
+
+  # стягиваем файлы из репозитория (или обновляем с диска, если он локально есть)
+  # берем прямо по RAW_BASE
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-watchdog.sh"              -o "$WATCHDOG_BIN"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-watchdog.service"         -o "$WATCHDOG_SERVICE"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-watchdog.timer"           -o "$WATCHDOG_TIMER"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-screen-launcher.sh"       -o "$LAUNCHER_BIN"
+  curl -fsSL "$RAW_BASE/agents/linux/gensyn-screen-launcher.service"  -o "$LAUNCHER_SERVICE"
+
+  chmod 0755 "$WATCHDOG_BIN" "$LAUNCHER_BIN"
+  chmod 0644 "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$LAUNCHER_SERVICE"
+
+  crlf_fix "$WATCHDOG_BIN" "$WATCHDOG_SERVICE" "$WATCHDOG_TIMER" "$LAUNCHER_BIN" "$LAUNCHER_SERVICE"
+
+  # Лог для swarm
+  if [[ ! -f "$SWARM_LOG" ]]; then
+    touch "$SWARM_LOG"
+    chmod 0644 "$SWARM_LOG"
+  fi
+
+  # Правим окружение агента, чтобы он не убивал нашу screen "gensyn"
+  if [[ -f "$AGENT_ENV" ]]; then
+    if ! grep -q '^AUTO_KILL_EMPTY_SCREEN=' "$AGENT_ENV" 2>/dev/null; then
+      echo "AUTO_KILL_EMPTY_SCREEN='false'" >> "$AGENT_ENV"
+    else
+      sed -i 's/^AUTO_KILL_EMPTY_SCREEN=.*/AUTO_KILL_EMPTY_SCREEN='"'"'false'"'"'/' "$AGENT_ENV"
+    fi
+  else
+    {
+      echo "AUTO_KILL_EMPTY_SCREEN='false'"
+    } > "$AGENT_ENV"
+    chmod 0644 "$AGENT_ENV"
+  fi
+
+  systemctl daemon-reload
+
+  # перезапустить агент, чтобы он перечитал env и перестал убивать screen gensyn
+  systemctl restart "$(basename "$AGENT_SERVICE")" || true
+
+  # включаем лаунчер (он создаёт screen gensyn и запускает rl-swarm)
+  systemctl enable --now "$(basename "$LAUNCHER_SERVICE")"
+
+  # включаем таймер watchdog (он следит за статус=DOWN и рестартит лаунчер)
+  systemctl enable --now "$(basename "$WATCHDOG_TIMER")"
+
+  echo "[+] Автостарт и авторестарт ноды установлен."
+  echo "[i] Сессия screen будет называться gensyn. Посмотреть: screen -ls / войти: screen -r gensyn"
+}
+
+watchdog_logs() {
+  need_root
+  echo "== journalctl gensyn-watchdog.service (последние 100 строк) =="
+  journalctl -u "$(basename "$WATCHDOG_SERVICE")" -n 100 --no-pager || true
+  echo
+  echo "== tail $SWARM_LOG (вывод ноды / run_rl_swarm.sh) =="
+  tail -n 100 "$SWARM_LOG" 2>/dev/null || echo "[i] Лог $SWARM_LOG пока пуст или не существует."
+}
+
+remove_autorestart() {
+  need_root
+  echo "[*] Останавливаю и удаляю авторестарт (watchdog + launcher)…"
+
+  # выключаем таймер и сервисы
+  systemctl disable --now "$(basename "$WATCHDOG_TIMER")" 2>/dev/null || true
+  systemctl disable --now "$(basename "$WATCHDOG_SERVICE")" 2>/dev/null || true
+  systemctl disable --now "$(basename "$LAUNCHER_SERVICE")" 2>/dev/null || true
+
+  # гасим screen gensyn
+  screen -S gensyn -X quit || true
+
+  # удаляем сами файлы
+  rm -f "$WATCHDOG_TIMER" "$WATCHDOG_SERVICE" "$WATCHDOG_BIN"
+  rm -f "$LAUNCHER_SERVICE" "$LAUNCHER_BIN"
+
+  systemctl daemon-reload
+
+  echo "[+] Авторестарт ноды удалён."
+  echo "[i] Лог $SWARM_LOG оставлен для отладки (не удалён). Если хочешь — сотри вручную."
+}
+
+###############################################################################
+#           МЕНЮ
+###############################################################################
+
 menu() {
   cat <<'EOF'
 ==== Gensyn Manager ====
@@ -580,6 +686,10 @@ menu() {
 10) Логи агента
 11) Удалить мониторинг
 12) Удалить агента
+----------------------------------------
+13) Установить/включить авторестарт ноды
+14) Логи авторестарта
+15) Удалить авторестарт ноды
 0) Выход
 EOF
 }
@@ -590,20 +700,23 @@ main() {
     menu
     read -rp "Выберите пункт: " choice || true
     case "${choice:-}" in
-      1) prepare_device ;;
-      2) install_monitor ;;
-      3) update_monitor ;;
-      4) install_agent ;;
-      5) reinstall_agent ;;
-      6) show_agent_env ;;
-      7) monitor_status ;;
-      8) monitor_logs ;;
-      9) agent_status ;;
+      1)  prepare_device ;;
+      2)  install_monitor ;;
+      3)  update_monitor ;;
+      4)  install_agent ;;
+      5)  reinstall_agent ;;
+      6)  show_agent_env ;;
+      7)  monitor_status ;;
+      8)  monitor_logs ;;
+      9)  agent_status ;;
       10) agent_logs ;;
       11) remove_monitor ;;
       12) remove_agent ;;
-      0) exit 0 ;;
-      *) echo "Неизвестный пункт" ;;
+      13) install_autorestart ;;
+      14) watchdog_logs ;;
+      15) remove_autorestart ;;
+      0)  exit 0 ;;
+      *)  echo "Неизвестный пункт" ;;
     esac
   done
 }
