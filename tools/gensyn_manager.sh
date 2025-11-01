@@ -108,7 +108,7 @@ tr(){
       ask_intv)           echo "GSWARM_REFRESH_INTERVAL (seconds)";;
       ask_show_src)       echo "GSWARM_SHOW_SRC (auto/always/never)";;
       ask_autosend)       echo "GSWARM_AUTO_SEND (0/1)";;
-      env_json_hint_1)    echo "GSWARM_NODE_MAP must be valid JSON or empty."; ;;
+      env_json_hint_1)    echo "GSWARM_NODE_MAP must be valid JSON or empty.";;
       env_json_hint_2)    echo "Example: {\"node-1\":{\"eoa\":\"0x...\",\"peer_ids\":[\"Qm..\"],\"tgid\":\"123456\"}}";;
       ask_nodemap)        echo "GSWARM_NODE_MAP (JSON or empty)";;
       bad_json)           echo "Invalid JSON. Using empty.";;
@@ -144,11 +144,11 @@ tr(){
       agent_cfg_path)     echo "Agent config:";;
       agent_timer_on)     echo "Agent enabled (timer)";;
       agent_initial_push) echo "Requesting initial G-Swarm sync...";;
-      agent_initial_ok)   echo "Initial G-Swarm sync requested."; ;
+      agent_initial_ok)   echo "Initial G-Swarm sync requested.";;
       agent_initial_fail) echo "Could not call G-Swarm API (skipped).";;
 
-      agent_old_removed)  echo "Old node_id removed from monitor."; ;
-      agent_old_fail)     echo "Could not remove old node_id from monitor."; ;
+      agent_old_removed)  echo "Old node_id removed from monitor.";;
+      agent_old_fail)     echo "Could not remove old node_id from monitor.";;
 
       agent_env_missing)  echo "Agent env file not found.";;
 
@@ -158,7 +158,7 @@ tr(){
       rm_agent_done)      echo "Agent removed.";;
 
       autorestart_install) echo "Installing autorestart (watchdog + launcher)...";;
-      autorestart_ok)      echo "Autorestart installed."; ;
+      autorestart_ok)      echo "Autorestart installed.";;
       autorestart_hint)    echo "Screen session name: gensyn (screen -ls / screen -r gensyn)";;
 
       autorestart_logs_live) echo "=== live watchdog logs (Ctrl+C to exit) ===";;
@@ -166,7 +166,7 @@ tr(){
       swarmlog_empty)       echo "[i] swarm log empty or missing";;
 
       autorestart_rm)       echo "Removing autorestart (watchdog + launcher)...";;
-      autorestart_rm_ok)    echo "Autorestart removed."; ;
+      autorestart_rm_ok)    echo "Autorestart removed.";;
       swarm_left)           echo "Swarm log left in";;
 
       press_enter)       echo "Press Enter to return to menu...";;
@@ -218,7 +218,7 @@ tr(){
       ask_intv)           echo "GSWARM_REFRESH_INTERVAL (в секундах)";;
       ask_show_src)       echo "GSWARM_SHOW_SRC (auto/always/never)";;
       ask_autosend)       echo "GSWARM_AUTO_SEND (0/1)";;
-      env_json_hint_1)    echo "GSWARM_NODE_MAP — валидный JSON или пусто."; ;;
+      env_json_hint_1)    echo "GSWARM_NODE_MAP — валидный JSON или пусто.";;
       env_json_hint_2)    echo "Пример: {\"node-1\":{\"eoa\":\"0x...\",\"peer_ids\":[\"Qm..\"],\"tgid\":\"123456\"}}";;
       ask_nodemap)        echo "GSWARM_NODE_MAP (JSON или пусто)";;
       bad_json)           echo "JSON кривой. Оставляю пусто.";;
@@ -227,7 +227,7 @@ tr(){
 
       port_busy)          echo "Порт уже занят. Освободи порт или выбери другой:";;
       fw_q)               echo "Открыть этот порт во фаерволе (ufw/firewalld)? (y/N):";;
-      fw_inactive)        echo "ufw есть, но он выключен. Пропускаю правило."; ;
+      fw_inactive)        echo "ufw есть, но он выключен. Пропускаю правило.";;
       fw_skip)            echo "Фаервол трогать не будем.";;
 
       repo_not_found)     echo "Каталог с монитором не найден. Сначала поставь монитор.";;
@@ -236,7 +236,7 @@ tr(){
       ask_delete_repo)    echo "Удалить эту папку? (y/N):";;
       ask_confirm_rm)     echo "Подтверди путь, который удаляем";;
       repo_deleted)       echo "Удалил:";;
-      repo_skip)          echo "Папку не трогаю."; ;
+      repo_skip)          echo "Папку не трогаю.";;
       monitor_removed)    echo "Мониторинг удалён.";;
 
       agent_dl)           echo "Скачиваю файлы агента из GitHub raw...";;
@@ -254,11 +254,11 @@ tr(){
       agent_cfg_path)     echo "Конфиг агента:";;
       agent_timer_on)     echo "Агент включён (таймер)";;
       agent_initial_push) echo "Дёргаю первичный сбор G-Swarm...";;
-      agent_initial_ok)   echo "Запросил первичный сбор G-Swarm."; ;
+      agent_initial_ok)   echo "Запросил первичный сбор G-Swarm.";;
       agent_initial_fail) echo "Не получилось дёрнуть G-Swarm API, пропустил.";;
 
-      agent_old_removed)  echo "Старый node_id убран из монитора."; ;
-      agent_old_fail)     echo "Не смог убрать старый node_id с монитора."; ;
+      agent_old_removed)  echo "Старый node_id убран из монитора.";;
+      agent_old_fail)     echo "Не смог убрать старый node_id с монитора.";;
 
       agent_env_missing)  echo "Файл окружения агента не найден.";;
 
@@ -268,7 +268,7 @@ tr(){
       rm_agent_done)      echo "Агент удалён.";;
 
       autorestart_install) echo "Ставлю авторестарт (watchdog + launcher)...";;
-      autorestart_ok)      echo "Авторестарт установлен."; ;
+      autorestart_ok)      echo "Авторестарт установлен.";;
       autorestart_hint)    echo "screen-сессия будет называться gensyn (screen -ls / screen -r gensyn)";;
 
       autorestart_logs_live) echo "=== живые логи watchdog (Ctrl+C чтобы выйти) ===";;
@@ -276,7 +276,7 @@ tr(){
       swarmlog_empty)       echo "[i] лог роя пустой или ещё не создался";;
 
       autorestart_rm)       echo "Убираю авторестарт (watchdog + launcher)...";;
-      autorestart_rm_ok)    echo "Авторестарт удалён."; ;
+      autorestart_rm_ok)    echo "Авторестарт удалён.";;
       swarm_left)           echo "Лог роя оставил в";;
 
       press_enter)       echo "Нажми Enter чтобы вернуться в меню...";;
