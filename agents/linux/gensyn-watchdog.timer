@@ -3,7 +3,7 @@ Description=Run gensyn-watchdog every minute
 
 [Timer]
 OnBootSec=30s
-OnUnitActiveSec=180s
+OnUnitActiveSec=300s
 AccuracySec=5s
 Unit=gensyn-watchdog.service
 
