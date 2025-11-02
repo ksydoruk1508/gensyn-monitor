@@ -32,7 +32,7 @@ logo(){ cat <<'EOF'
 EOF
 }
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 
 # -----------------------------
 # Paths / Constants
@@ -675,19 +675,22 @@ remove_monitor(){
 # -----------------------------
 ensure_repo_for_agent(){
   local local_agents="$REPO_ROOT/agents/linux"
+
   if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
     echo "$local_agents"
     return 0
   fi
+
   if have_cmd git; then
-    info "agent files not found locally, cloning to $REPO_DIR"
-    clone_or_update_repo "$REPO_DIR"
+    info "agent files not found locally, cloning to $REPO_DIR" >&2
+    clone_or_update_repo "$REPO_DIR" >&2
     local_agents="$REPO_DIR/agents/linux"
     if [[ -f "$local_agents/gensyn_agent.sh" ]]; then
       echo "$local_agents"
       return 0
     fi
   fi
+
   echo ""
   return 1
 }
