@@ -37,6 +37,11 @@
     th.sortable::after { content: '⇅'; font-size: 11px; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); opacity: .35; }
     th.sortable.sort-asc::after { content: '↑'; opacity: .9; }
     th.sortable.sort-desc::after { content: '↓'; opacity: .9; }
+    th#gswarmHeader.sort-wins-desc::after { content: '↓W'; opacity: .9; font-weight: 700; }
+    th#gswarmHeader.sort-wins-asc::after  { content: '↑W'; opacity: .9; font-weight: 700; }
+    th#gswarmHeader.sort-rew-desc::after  { content: '↓R'; opacity: .9; font-weight: 700; }
+    th#gswarmHeader.sort-rew-asc::after   { content: '↑R'; opacity: .9; font-weight: 700; }
+
     code { background: rgba(127,127,127,.12); padding: 2px 6px; border-radius: 6px; }
     body.dark code { background: rgba(255,255,255,.08); }
     .UP { color: #1a7f37; font-weight: 700; }
@@ -82,7 +87,7 @@
         <th id="statusHeader" class="sortable">Статус</th>
         <th>Последний heartbeat</th>
         <th>Возраст, сек</th>
-        <th>G-Swarm</th>
+        <th id="gswarmHeader" class="sortable">G-Swarm</th>
         <th>Alerts</th>
         <th>Meta</th>
       </tr>
@@ -107,44 +112,72 @@
     const updatedAtEl = document.getElementById('updatedAt');
     const nodeIdHeader = document.getElementById('nodeIdHeader');
     const statusHeader = document.getElementById('statusHeader');
+    const gswarmHeader = document.getElementById('gswarmHeader');
+
     const expandedNodes = new Set();
     let nodes = [];
+
+    // Состояния сортировки
     let nodeSortOrder = null;      // 'asc' | 'desc' | null
     let statusSortOrder = null;    // 'down-first' | 'up-first' | null
+    // gswarmSortMode: null | 'wins-desc' | 'wins-asc' | 'rew-desc' | 'rew-asc'
+    let gswarmSortMode = null;
 
     function sortByNodeId(a, b, dir = 1) {
       const aMatch = a.node_id.match(/\d+/);
       const bMatch = b.node_id.match(/\d+/);
-      // если есть числа в node_id - сортируем по числу
       if (aMatch && bMatch) {
         const aNum = parseInt(aMatch[0], 10);
         const bNum = parseInt(bMatch[0], 10);
         return dir * (aNum - bNum);
       }
-      // иначе строковое сравнение
       return dir * a.node_id.localeCompare(b.node_id);
     }
 
+    function getTotals(n) {
+      const totals = (n.gswarm && n.gswarm.stats && n.gswarm.stats.totals) || {};
+      return {
+        wins: Number.isFinite(+totals.wins) ? +totals.wins : -1,
+        rewards: Number.isFinite(+totals.rewards) ? +totals.rewards : -1,
+      };
+    }
+
     function sortNodes(data) {
-      // 1) Явная сортировка по статусу, если пользователь кликнул колонку "Статус"
+      // 0) Сортировка по G-Swarm (Wins/Rewards)
+      if (gswarmSortMode) {
+        return data.sort((a, b) => {
+          const { wins: aw, rewards: ar } = getTotals(a);
+          const { wins: bw, rewards: br } = getTotals(b);
+
+          switch (gswarmSortMode) {
+            case 'wins-desc':  if (aw !== bw) return bw - aw; break;
+            case 'wins-asc':   if (aw !== bw) return aw - bw; break;
+            case 'rew-desc':   if (ar !== br) return br - ar; break;
+            case 'rew-asc':    if (ar !== br) return ar - br; break;
+          }
+          // тай-брейк по node_id
+          return sortByNodeId(a, b, 1);
+        });
+      }
+
+      // 1) Явная сортировка по статусу
       if (statusSortOrder) {
         const desired = statusSortOrder === 'down-first' ? ['DOWN', 'UP'] : ['UP', 'DOWN'];
         return data.sort((a, b) => {
           const ia = desired.indexOf(a.computed);
           const ib = desired.indexOf(b.computed);
           if (ia !== ib) return ia - ib;
-          // тай-брейк по node_id возрастанию
           return sortByNodeId(a, b, 1);
         });
       }
 
-      // 2) Явная сортировка по Node ID (клик по заголовку Node ID)
+      // 2) Явная сортировка по Node ID
       if (nodeSortOrder === 'asc' || nodeSortOrder === 'desc') {
         const dir = nodeSortOrder === 'asc' ? 1 : -1;
         return data.sort((a, b) => sortByNodeId(a, b, dir));
       }
 
-      // 3) Сортировка по умолчанию: DOWN выше, затем по node_id
+      // 3) По умолчанию: DOWN выше, затем по node_id
       return data.sort((a, b) => {
         if ((a.computed === 'DOWN') === (b.computed === 'DOWN')) {
           return sortByNodeId(a, b, 1);
@@ -154,21 +187,30 @@
     }
 
     function renderNodes() {
-      let data = sortNodes([...nodes]);
-
+      const data = sortNodes([...nodes]);
       tbody.innerHTML = '';
 
-      // сброс визуальных индикаторов сортировки
+      // сброс индикаторов
       nodeIdHeader.classList.remove('sort-asc', 'sort-desc');
       statusHeader.classList.remove('sort-asc', 'sort-desc');
+      gswarmHeader.classList.remove('sort-wins-desc','sort-wins-asc','sort-rew-desc','sort-rew-asc');
 
       // отметить активную сортировку
       if (nodeSortOrder === 'asc') nodeIdHeader.classList.add('sort-asc');
       else if (nodeSortOrder === 'desc') nodeIdHeader.classList.add('sort-desc');
 
-      // для статуса используем: up-first => sort-asc, down-first => sort-desc
       if (statusSortOrder === 'up-first') statusHeader.classList.add('sort-asc');
       else if (statusSortOrder === 'down-first') statusHeader.classList.add('sort-desc');
+
+      if (gswarmSortMode) {
+        const cls = {
+          'wins-desc': 'sort-wins-desc',
+          'wins-asc':  'sort-wins-asc',
+          'rew-desc':  'sort-rew-desc',
+          'rew-asc':   'sort-rew-asc',
+        }[gswarmSortMode];
+        if (cls) gswarmHeader.classList.add(cls);
+      }
 
       for (const n of data) {
         const tr = document.createElement('tr');
@@ -179,6 +221,7 @@
         const allowAlerts = Boolean(ADMIN_TOKEN);
         const alertDisabled = allowAlerts ? '' : ' disabled';
         const alertTitle = allowAlerts ? 'Toggle Telegram alerts' : 'Alerts disabled (ADMIN_TOKEN missing)';
+
         tr.innerHTML = `
           <td><code>${esc(n.node_id)}</code></td>
           <td><code>${esc(n.ip || '')}</code></td>
@@ -305,22 +348,34 @@
       }
     }
 
+    // Слушатели заголовков
     document.getElementById('refreshBtn').addEventListener('click', load);
 
-    // клик по Node ID - сортировка по id, сбрасываем сортировку по статусу
     nodeIdHeader.addEventListener('click', () => {
       nodeSortOrder = nodeSortOrder === 'asc' ? 'desc' : 'asc';
+      statusSortOrder = null;
+      gswarmSortMode = null;
+      renderNodes();
+    });
+
+    statusHeader.addEventListener('click', () => {
+      statusSortOrder = statusSortOrder === 'down-first' ? 'up-first' : 'down-first';
+      nodeSortOrder = null;
+      gswarmSortMode = null;
+      renderNodes();
+    });
+
+    // Клик по G-Swarm: Wins↓ → Wins↑ → Rewards↓ → Rewards↑ → …
+    gswarmHeader.addEventListener('click', () => {
+      const order = ['wins-desc', 'wins-asc', 'rew-desc', 'rew-asc'];
+      const idx = order.indexOf(gswarmSortMode);
+      gswarmSortMode = order[(idx + 1) % order.length];
+      nodeSortOrder = null;
       statusSortOrder = null;
       renderNodes();
     });
 
-    // клик по Статус - первый клик: DOWN сверху, второй клик: UP сверху, затем циклим
-    statusHeader.addEventListener('click', () => {
-      statusSortOrder = statusSortOrder === 'down-first' ? 'up-first' : 'down-first';
-      nodeSortOrder = null; // сбрасываем сортировку по Node ID
-      renderNodes();
-    });
-
+    // Тема
     const themeBtn = document.getElementById('themeBtn');
     function applyTheme(theme) {
       document.body.classList.toggle('dark', theme === 'dark');
