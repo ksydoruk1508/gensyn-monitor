@@ -184,29 +184,30 @@ async def upsert(
     gswarm_peer_ids: Optional[List[str]],
     gswarm_tgid: Optional[str]
 ):
-    """
-    reported — статус, присланный агентом: 'UP' | 'DOWN' (валидируем в handler’е).
-    """
     now = int(time.time())
     gswarm_eoa = (gswarm_eoa or "").strip() or None
     gswarm_tgid = (gswarm_tgid or "").strip() or None
     peers_blob = peers_to_store(gswarm_peer_ids)
+
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT INTO nodes(
-                node_id,ip,last_seen,last_state,last_computed,meta,last_reported,gswarm_eoa,gswarm_tgid,gswarm_peer_ids
+                node_id, ip, last_seen, last_state, last_computed, meta,
+                last_reported, gswarm_eoa, gswarm_tgid, gswarm_peer_ids
             )
             VALUES(?, ?, ?, 'DOWN','UP', ?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE
-              SET ip=excluded.ip,
-                  last_seen=excluded.last_seen,
-                  meta=excluded.meta,
-                  last_reported=excluded.last_reported,
-                  gswarm_eoa=excluded.gswarm_eoa,
-                  gswarm_tgid=excluded.gswarm_tgid,
-                  gswarm_peer_ids=excluded.gswarm_peer_ids
+            ON CONFLICT(node_id) DO UPDATE SET
+              ip             = excluded.ip,
+              last_seen      = excluded.last_seen,
+              meta           = excluded.meta,
+              last_reported  = excluded.last_reported,
+              -- не перетираем, если агент прислал NULL/пусто
+              gswarm_eoa      = COALESCE(excluded.gswarm_eoa,      nodes.gswarm_eoa),
+              gswarm_tgid     = COALESCE(excluded.gswarm_tgid,     nodes.gswarm_tgid),
+              gswarm_peer_ids = COALESCE(excluded.gswarm_peer_ids, nodes.gswarm_peer_ids)
         """, (node_id, ip, now, meta, reported, gswarm_eoa, gswarm_tgid, peers_blob))
         await db.commit()
+
 
 async def list_nodes():
     async with aiosqlite.connect(DB) as db:
@@ -485,6 +486,7 @@ def _collect_peer_groups(node_configs: Dict[str, Dict[str, Any]]) -> Dict[str | 
 async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str, Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], int]:
     if not node_configs:
         return {}, 0
+
     per_peer = result.get("per_peer", {}) or {}
     last_check = result.get("ts")
     eoa_peer_map = result.get("eoa_peers", {}) or {}
@@ -492,33 +494,111 @@ async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str,
     now_ts = int(time.time())
     node_stats = _aggregate_nodes(per_peer, node_configs, last_check)
 
+    def _merge_peer(old: Dict[str, Any] | None, new: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not new and not old:
+            return None
+        if not old:
+            return new
+        if not new:
+            return old
+        out = dict(new)
+        # wins/rewards — никогда не понижаем
+        out["per_peer"] = {}
+        totals_wins = 0
+        totals_rewards = 0
+        ranked = 0
+        # собрать множество всех peerId
+        all_ids = set((old.get("per_peer") or {}).keys()) | set((new.get("per_peer") or {}).keys())
+        for pid in all_ids:
+            vo = (old.get("per_peer") or {}).get(pid, {}) or {}
+            vn = (new.get("per_peer") or {}).get(pid, {}) or {}
+            w = max(int(vo.get("wins", 0) or 0), int(vn.get("wins", 0) or 0))
+            r = max(int(vo.get("rewards", 0) or 0), int(vn.get("rewards", 0) or 0))
+            rk_candidates = [x for x in [vo.get("rank"), vn.get("rank")] if isinstance(x, int) and x > 0]
+            rk = min(rk_candidates) if rk_candidates else None
+            out["per_peer"][pid] = {"wins": w, "rewards": r, "rank": rk}
+            totals_wins += w
+            totals_rewards += r
+            if w > 0:
+                ranked += 1
+        peers_cnt = len(all_ids)
+        out["totals"] = {
+            "wins": totals_wins,
+            "rewards": totals_rewards,
+            "peers": peers_cnt,
+            "ranked": ranked,
+        }
+        # перенос вспомогательных полей
+        for k in ("eoa", "tgid", "alert", "last_check", "missing_peers"):
+            if k in new and new[k] is not None:
+                out[k] = new[k]
+            elif k in old and old[k] is not None:
+                out[k] = old[k]
+        return out
+
     async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
         updated_count = 0
+
+        # прочитать текущие сохранённые статы
+        cur = await db.execute("SELECT node_id, gswarm_stats, gswarm_updated FROM nodes")
+        rows = await cur.fetchall()
+        existing: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            blob = r["gswarm_stats"]
+            if blob:
+                try:
+                    existing[r["node_id"]] = json.loads(blob)
+                except Exception:
+                    existing[r["node_id"]] = None
+
         for node_id, cfg in node_configs.items():
-            stats = node_stats.get(node_id)
-            payload_dict = stats if stats else None
-            if payload_dict and cfg.get("eoa") and not payload_dict.get("eoa"):
-                payload_dict = dict(payload_dict)
-                payload_dict["eoa"] = cfg["eoa"]
-            if payload_dict and cfg.get("tgid") and not payload_dict.get("tgid"):
-                payload_dict = dict(payload_dict)
-                payload_dict["tgid"] = cfg["tgid"]
-            payload = json.dumps(payload_dict, ensure_ascii=False) if payload_dict else None
-            updated_ts = now_ts if stats else None
+            new_stats = node_stats.get(node_id)
+            old_stats = existing.get(node_id)
+
+            # если вообще ничего нового — пропускаем
+            if not new_stats and not old_stats:
+                continue
+            if not new_stats and old_stats:
+                # нечего обновлять, но и не затираем
+                continue
+
+            # защитa от «регресса» (лимиты/пустые ответы)
+            if old_stats and new_stats:
+                old_tot = old_stats.get("totals") or {}
+                new_tot = new_stats.get("totals") or {}
+                old_w = int(old_tot.get("wins", 0) or 0)
+                old_r = int(old_tot.get("rewards", 0) or 0)
+                new_w = int(new_tot.get("wins", 0) or 0)
+                new_r = int(new_tot.get("rewards", 0) or 0)
+                if new_w < old_w or new_r < old_r or (new_tot.get("peers", 0) or 0) == 0:
+                    # не обновляем — оставляем прежние данные
+                    continue
+
+            merged = _merge_peer(old_stats, new_stats)
+
+            payload = json.dumps(merged, ensure_ascii=False) if merged else None
             peers_blob = peers_to_store(cfg.get("peer_ids"))
             tgid_value = cfg.get("tgid") or None
+
             await db.execute(
                 """
                 UPDATE nodes
-                SET gswarm_stats=?, gswarm_updated=?, gswarm_eoa=?, gswarm_tgid=?, gswarm_peer_ids=?
+                SET gswarm_stats=?,
+                    gswarm_updated=?,
+                    gswarm_eoa=?,
+                    gswarm_tgid=?,
+                    gswarm_peer_ids=?
                 WHERE node_id=?
                 """,
-                (payload, updated_ts, (cfg.get("eoa") or None), tgid_value, peers_blob, node_id),
+                (payload, now_ts, (cfg.get("eoa") or None), tgid_value, peers_blob, node_id),
             )
-            if stats:
-                updated_count += 1
+            updated_count += 1
+
         await db.commit()
+
     return node_stats, updated_count
+
 
 async def refresh_gswarm_stats():
     logger.info("[GSWARM] refresh: collecting sources…")
