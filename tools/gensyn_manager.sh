@@ -177,20 +177,21 @@ tr(){
       m3)  echo "Update dashboard monitor";;
       m4)  echo "Monitor status";;
       m5)  echo "Monitor logs";;
-      m6)  echo "Remove dashboard monitor";;
+      m6)  echo "Dashboard Reset";;
+      m7)  echo "Remove dashboard monitor";;
 
-      m7)  echo "Install agent";;
-      m8)  echo "Reinstall agent (stop+install)";;
-      m9)  echo "Show agent config";;
-      m10) echo "Agent status";;
-      m11) echo "Agent logs";;
-      m12) echo "Remove agent";;
+      m8)  echo "Install agent";;
+      m9)  echo "Reinstall agent (stop+install)";;
+      m10)  echo "Show agent config";;
+      m11) echo "Agent status";;
+      m12) echo "Agent logs";;
+      m13) echo "Remove agent";;
 
-      m13) echo "Install autorestart (watchdog + launcher)";;
-      m14) echo "Watchdog logs (live + swarm tail)";;
-      m15) echo "Remove autorestart";;
+      m14) echo "Install autorestart (watchdog + launcher)";;
+      m15) echo "Watchdog logs (live + swarm tail)";;
+      m16) echo "Remove autorestart";;
 
-      m16) echo "Change language";;
+      m17) echo "Change language";;
       m0) echo "Exit";;
     esac
   else
@@ -287,20 +288,21 @@ tr(){
       m3)  echo "Обновить мониторинг";;
       m4)  echo "Статус мониторинга";;
       m5)  echo "Логи мониторинга";;
-      m6)  echo "Удалить мониторинг";;
+      m6)  echo "Ресет дашборда";;
+      m7)  echo "Удалить мониторинг";;
 
-      m7)  echo "Установить агента (на сервере с нодой)";;
-      m8)  echo "Переустановить агента";;
-      m9)  echo "Показать конфиг агента";;
-      m10) echo "Статус агента";;
-      m11) echo "Логи агента";;
-      m12) echo "Удалить агента";;
+      m8)  echo "Установить агента (на сервере с нодой)";;
+      m9)  echo "Переустановить агента";;
+      m10)  echo "Показать конфиг агента";;
+      m11) echo "Статус агента";;
+      m12) echo "Логи агента";;
+      m13) echo "Удалить агента";;
 
-      m13) echo "Поставить авторестарт";;
-      m14) echo "Логи авторестарта";;
-      m15) echo "Удалить авторестарт";;
+      m14) echo "Поставить авторестарт";;
+      m15) echo "Логи авторестарта";;
+      m16) echo "Удалить авторестарт";;
 
-      m16) echo "Сменить язык / Change language";;
+      m17) echo "Сменить язык / Change language";;
       m0) echo "Выход";;
     esac
   fi
@@ -644,6 +646,16 @@ monitor_logs(){
   journalctl -u ${SERVICE_NAME}.service -n 100 --no-pager
 }
 
+reset_monitor(){
+  need_root
+  echo "⏳ Перезапускаю монитор и очищаю данные..."
+  systemctl stop gensyn-monitor || true
+  rm -f /opt/gensyn-monitor/monitor.db
+  rm -rf /opt/gensyn-monitor/__pycache__/ /opt/gensyn-monitor/integrations/__pycache__/ || true
+  systemctl start gensyn-monitor
+  ok "Дашборд сброшен и перезапущен."
+}
+
 remove_monitor(){
   need_root
   systemctl disable --now ${SERVICE_NAME}.service || true
@@ -970,19 +982,20 @@ main_menu(){
     echo "4)  $(tr m4)"
     echo "5)  $(tr m5)"
     echo "6)  $(tr m6)"
-    hr
     echo "7)  $(tr m7)"
-    echo "8)  $(tr m8)"
-    echo "9)  $(tr m9)"
-    echo "10) $(tr m10)"
-    echo "11) $(tr m11)"
-    echo "12) $(tr m12)"
     hr
-    echo "13) $(tr m13)"
-    echo "14) $(tr m14)"
-    echo "15) $(tr m15)"
+    echo "8)  $(tr m7)"
+    echo "9)  $(tr m8)"
+    echo "10)  $(tr m9)"
+    echo "11) $(tr m10)"
+    echo "12) $(tr m11)"
+    echo "13) $(tr m12)"
     hr
-    echo "16) $(tr m16)"
+    echo "14) $(tr m13)"
+    echo "15) $(tr m14)"
+    echo "16) $(tr m15)"
+    hr
+    echo "17) $(tr m16)"
     echo "0) $(tr m0)"
     hr
 
@@ -993,17 +1006,18 @@ main_menu(){
       3)  update_monitor ;;
       4)  monitor_status ;;
       5)  monitor_logs ;;
-      6)  remove_monitor ;;
-      7)  install_agent ;;
-      8)  reinstall_agent ;;
-      9)  show_agent_env ;;
-      10) agent_status ;;
-      11) agent_logs ;;
-      12) remove_agent ;;
-      13) install_autorestart ;;
-      14) watchdog_logs ;;
-      15) remove_autorestart ;;
-      16) choose_lang ;;
+      6)  reset_monitor ;;
+      7)  remove_monitor ;;
+      8)  install_agent ;;
+      9)  reinstall_agent ;;
+      10)  show_agent_env ;;
+      11) agent_status ;;
+      12) agent_logs ;;
+      13) remove_agent ;;
+      14) install_autorestart ;;
+      15) watchdog_logs ;;
+      16) remove_autorestart ;;
+      17) choose_lang ;;
       0) exit 0 ;;
       *)  ;;
     esac
