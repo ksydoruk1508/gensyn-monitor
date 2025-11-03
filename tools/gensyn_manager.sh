@@ -32,7 +32,7 @@ logo(){ cat <<'EOF'
 EOF
 }
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 
 # -----------------------------
 # Paths / Constants
