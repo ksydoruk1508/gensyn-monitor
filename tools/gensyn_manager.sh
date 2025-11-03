@@ -984,18 +984,18 @@ main_menu(){
     echo "6)  $(tr m6)"
     echo "7)  $(tr m7)"
     hr
-    echo "8)  $(tr m7)"
-    echo "9)  $(tr m8)"
-    echo "10)  $(tr m9)"
-    echo "11) $(tr m10)"
-    echo "12) $(tr m11)"
-    echo "13) $(tr m12)"
+    echo "8)  $(tr m8)"
+    echo "9)  $(tr m9)"
+    echo "10)  $(tr m10)"
+    echo "11) $(tr m11)"
+    echo "12) $(tr m12)"
+    echo "13) $(tr m13)"
     hr
-    echo "14) $(tr m13)"
-    echo "15) $(tr m14)"
-    echo "16) $(tr m15)"
+    echo "14) $(tr m14)"
+    echo "15) $(tr m15)"
+    echo "16) $(tr m16)"
     hr
-    echo "17) $(tr m16)"
+    echo "17) $(tr m17)"
     echo "0) $(tr m0)"
     hr
 
