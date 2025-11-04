@@ -22,10 +22,10 @@ _SWARM_COORDINATOR = os.environ.get(
 ).strip()
 
 # ограничения и паузы
-_MAX_WORKERS = int(os.environ.get("GSWARM_MAX_WORKERS", "4"))  # поменьше, чтобы не ловить 429
-_EOA_PAUSE = int(os.environ.get("GSWARM_EOA_PAUSE_SEC", "30"))  # пауза между EOA
+_MAX_WORKERS = int(os.environ.get("GSWARM_MAX_WORKERS", "2"))  # поменьше, чтобы не ловить 429
+_EOA_PAUSE = int(os.environ.get("GSWARM_EOA_PAUSE_SEC", "60"))  # пауза между EOA
 _REWARDS_CHUNK = int(os.environ.get("GSWARM_REWARDS_CHUNK", "20"))  # размер чанка для getTotalRewards
-_CHUNK_PAUSE = float(os.environ.get("GSWARM_CHUNK_PAUSE_SEC", "2"))  # пауза между чанками rewards
+_CHUNK_PAUSE = float(os.environ.get("GSWARM_CHUNK_PAUSE_SEC", "20"))  # пауза между чанками rewards
 _PER_CALL_JITTER = float(os.environ.get("GSWARM_PER_CALL_JITTER_SEC", "0.05"))  # микропаузка в воркерах
 
 # ретраи на 429/таймауты
