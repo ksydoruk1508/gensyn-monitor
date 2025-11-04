@@ -409,6 +409,7 @@ def _build_node_gswarm(per_peer: Dict[str, Dict[str, Any]], peers: List[str], la
     missing: List[str] = []
     total_wins = 0
     total_rewards = 0
+    total_votes = 0
     ranked = 0
     for pid in peers:
         data = per_peer.get(pid)
@@ -416,8 +417,10 @@ def _build_node_gswarm(per_peer: Dict[str, Dict[str, Any]], peers: List[str], la
             matched[pid] = data
             wins_val = int(data.get("wins", 0) or 0)
             rewards_val = int(data.get("rewards", 0) or 0)
+            votes_val = int(data.get("votes", 0) or 0)
             total_wins += wins_val
             total_rewards += rewards_val
+            total_votes += votes_val
             if wins_val > 0:
                 ranked += 1
         else:
@@ -429,6 +432,7 @@ def _build_node_gswarm(per_peer: Dict[str, Dict[str, Any]], peers: List[str], la
         "totals": {
             "wins": total_wins,
             "rewards": total_rewards,
+            "votes": total_votes,
             "peers": len(peers),
             "ranked": ranked,
         },
@@ -506,6 +510,7 @@ async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str,
         out["per_peer"] = {}
         totals_wins = 0
         totals_rewards = 0
+        totals_votes = 0
         ranked = 0
         # собрать множество всех peerId
         all_ids = set((old.get("per_peer") or {}).keys()) | set((new.get("per_peer") or {}).keys())
@@ -514,17 +519,20 @@ async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str,
             vn = (new.get("per_peer") or {}).get(pid, {}) or {}
             w = max(int(vo.get("wins", 0) or 0), int(vn.get("wins", 0) or 0))
             r = max(int(vo.get("rewards", 0) or 0), int(vn.get("rewards", 0) or 0))
+            v = max(int(vo.get("votes", 0) or 0), int(vn.get("votes", 0) or 0))
             rk_candidates = [x for x in [vo.get("rank"), vn.get("rank")] if isinstance(x, int) and x > 0]
             rk = min(rk_candidates) if rk_candidates else None
-            out["per_peer"][pid] = {"wins": w, "rewards": r, "rank": rk}
+            out["per_peer"][pid] = {"wins": w, "rewards": r, "votes": v, "rank": rk}
             totals_wins += w
             totals_rewards += r
+            totals_votes += v
             if w > 0:
                 ranked += 1
         peers_cnt = len(all_ids)
         out["totals"] = {
             "wins": totals_wins,
             "rewards": totals_rewards,
+            "votes": totals_votes,
             "peers": peers_cnt,
             "ranked": ranked,
         }
@@ -626,10 +634,13 @@ async def refresh_gswarm_stats():
 
     _, updated_count = await _persist_gswarm_result(result, node_configs)
 
-    logger.info("[GSWARM] refresh ok: nodes=%d, peers=%d, wins=%s, rewards=%s, updated=%d",
-                len(node_configs), len(result.get("per_peer", {})),
-                result.get("totals",{}).get("wins"), result.get("totals",{}).get("rewards"),
-                updated_count)
+    logger.info(
+        "[GSWARM] refresh ok: nodes=%d, peers=%d, wins=%s, rewards=%s, votes=%s, updated=%d",
+        len(node_configs), len(result.get("per_peer", {})),
+        result.get("totals",{}).get("wins"), result.get("totals",{}).get("rewards"),
+        result.get("totals",{}).get("votes"),
+        updated_count,
+    )
 
 async def gswarm_loop():
     await asyncio.sleep(5)

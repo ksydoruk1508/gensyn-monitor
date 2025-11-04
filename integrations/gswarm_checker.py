@@ -250,7 +250,7 @@ def run_once(include_nodes: bool = False, send: bool = False, send_telegram: boo
             "ts": ts,
             "per_peer": {},
             "eoa_peers": eoa_peers,
-            "totals": {"wins": 0, "rewards": 0, "peers": 0},
+            "totals": {"wins": 0, "rewards": 0, "votes": 0, "peers": 0},
         }
         log.info("[GSWARM-mini] run_once: nothing to query, done")
         return out
@@ -259,26 +259,36 @@ def run_once(include_nodes: bool = False, send: bool = False, send_telegram: boo
     w3 = _w3()
     c = _contract(w3)
 
-    wins_map, _votes_map = _fetch_wins_votes_parallel(c, peers_unique)
+    wins_map, votes_map = _fetch_wins_votes_parallel(c, peers_unique)
     rewards_map = _fetch_rewards_batch(c, peers_unique)
 
     per_peer: Dict[str, Dict] = {}
     tot_wins = 0
     tot_rewards = 0
+    tot_votes = 0
     for pid in peers_unique:
         w = int(wins_map.get(pid, 0) or 0)
         r = int(rewards_map.get(pid, 0) or 0)
-        per_peer[pid] = {"wins": w, "rewards": r}
+        v = int(votes_map.get(pid, 0) or 0)
+        per_peer[pid] = {"wins": w, "rewards": r, "votes": v}
         tot_wins += w
         tot_rewards += r
+        tot_votes += v
 
     out = {
         "ok": True,
         "ts": ts,
         "per_peer": per_peer,
         "eoa_peers": eoa_peers,
-        "totals": {"wins": tot_wins, "rewards": tot_rewards, "peers": len(peers_unique)},
+        "totals": {
+            "wins": tot_wins,
+            "rewards": tot_rewards,
+            "votes": tot_votes,
+            "peers": len(peers_unique)
+        },
     }
-    log.info("[GSWARM-mini] run_once: done peers=%d, total_wins=%s, total_rewards=%s",
-             len(peers_unique), tot_wins, tot_rewards)
+    log.info(
+        "[GSWARM-mini] run_once: done peers=%d, total_wins=%s, total_rewards=%s, total_votes=%s",
+        len(peers_unique), tot_wins, tot_rewards, tot_votes
+    )
     return out

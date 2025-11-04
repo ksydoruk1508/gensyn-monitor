@@ -139,6 +139,7 @@
       return {
         wins: Number.isFinite(+totals.wins) ? +totals.wins : -1,
         rewards: Number.isFinite(+totals.rewards) ? +totals.rewards : -1,
+        votes: Number.isFinite(+totals.votes) ? +totals.votes : -1,
       };
     }
 
@@ -264,15 +265,16 @@
       if (!gs) return '<span class="muted">n/a</span>';
       const stats = gs.stats || {};
       const totals = stats.totals || {};
-      const wins = totals.wins ?? 'n/a';
+      const votes = totals.votes ?? 'n/a';
       const rewards = totals.rewards ?? 'n/a';
+      const wins = totals.wins ?? 'n/a';
       const peers = (gs.peer_ids && gs.peer_ids.length) ? gs.peer_ids.length : (totals.peers ?? 'n/a');
       const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
       const eoa = gs.eoa || stats.eoa;
       const tgid = gs.tgid || stats.tgid;
       return `
         <div>
-          <div><strong>Wins ${wins}</strong> | Rewards ${rewards}</div>
+          <div><strong>Votes ${votes}</strong> | Rewards ${rewards} | Wins ${wins}</div>
           <div class="muted small">Peers: ${peers}${last ? ` | Last ${esc(last)}` : ''}</div>
           ${eoa ? `<div class="muted small">EOA: <code>${esc(eoa)}</code></div>` : ''}
           ${tgid ? `<div class="muted small">TG ID: <code>${esc(tgid)}</code></div>` : ''}
@@ -288,13 +290,14 @@
       const peers = (gs.peer_ids && gs.peer_ids.length ? gs.peer_ids : Object.keys(per)).filter(Boolean);
       const peerCards = peers.map((pid) => {
         const data = per[pid] || {};
-        const wins = data.wins ?? 0;
+        const votes = data.votes ?? 0;
         const rewards = data.rewards ?? 0;
+        const wins = data.wins ?? 0;
         const rank = data.rank ? `Top #${esc(data.rank)}` : 'n/a';
         return `
           <div class="peer-badge">
             <div><code>${esc(pid)}</code></div>
-            <div>${wins} wins | ${rewards} rewards | ${rank}</div>
+            <div>${votes} votes | ${rewards} rewards | ${wins} wins | ${rank}</div>
           </div>
         `;
       }).join('');
@@ -306,7 +309,7 @@
       const tgid = gs.tgid || stats.tgid;
       return `
         <div class="gswarm-card">
-          <div class="gswarm-head">Wins ${totals.wins ?? 0} | Rewards ${totals.rewards ?? 0}</div>
+          <div class="gswarm-head">Votes ${totals.votes ?? 0} | Rewards ${totals.rewards ?? 0} | Wins ${totals.wins ?? 0}</div>
           <div class="peer-list">${peerCards || '<span class="muted">Peers не найдены</span>'}</div>
           ${missing}
           ${eoa ? `<div class="small">EOA: <code>${esc(eoa)}</code></div>` : ''}
