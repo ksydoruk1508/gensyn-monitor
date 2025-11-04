@@ -560,6 +560,23 @@ prompt_monitor_env(){
     else
       echo "GSWARM_NODE_MAP="
     fi
+
+    # ---- GSWARM performance defaults (add if missing; keep existing) ----
+    # Pull existing values (sourced above) or use DEFAULT_* or hard defaults
+    _gw_max="${DEFAULT_GSWARM_MAX_WORKERS:-${GSWARM_MAX_WORKERS:-2}}"
+    _gw_chunk="${DEFAULT_GSWARM_REWARDS_CHUNK:-${GSWARM_REWARDS_CHUNK:-100}}"
+    _gw_pause="${DEFAULT_GSWARM_CHUNK_PAUSE_SEC:-${GSWARM_CHUNK_PAUSE_SEC:-45}}"
+    _gw_jitter="${DEFAULT_GSWARM_PER_CALL_JITTER_SEC:-${GSWARM_PER_CALL_JITTER_SEC:-0.03}}"
+    _gw_eoa_pause="${DEFAULT_GSWARM_EOA_PAUSE_SEC:-${GSWARM_EOA_PAUSE_SEC:-45}}"
+    _gw_retry="${DEFAULT_GSWARM_RETRY_MAX:-${GSWARM_RETRY_MAX:-1}}"
+
+    write_kv "GSWARM_MAX_WORKERS" "$_gw_max"
+    write_kv "GSWARM_REWARDS_CHUNK" "$_gw_chunk"
+    write_kv "GSWARM_CHUNK_PAUSE_SEC" "$_gw_pause"
+    write_kv "GSWARM_PER_CALL_JITTER_SEC" "$_gw_jitter"
+    write_kv "GSWARM_EOA_PAUSE_SEC" "$_gw_eoa_pause"
+    write_kv "GSWARM_RETRY_MAX" "$_gw_retry"
+
     write_kv "DB_PATH" "${repo}/monitor.db"
   } > "$tmp"
   mv -f "$tmp" "$env_file"
