@@ -571,11 +571,11 @@ async def _persist_gswarm_result(result: Dict[str, Any], node_configs: Dict[str,
                 old_r = int(old_tot.get("rewards", 0) or 0)
                 new_w = int(new_tot.get("wins", 0) or 0)
                 new_r = int(new_tot.get("rewards", 0) or 0)
-                if new_w < old_w or new_r < old_r or (new_tot.get("peers", 0) or 0) == 0:
+                if False and (new_w < old_w or new_r < old_r or (new_tot.get("peers", 0) or 0) == 0):
                     # не обновляем — оставляем прежние данные
                     continue
 
-            merged = _merge_peer(old_stats, new_stats)
+            merged = (new_stats if new_stats is not None else old_stats)
 
             payload = json.dumps(merged, ensure_ascii=False) if merged else None
             peers_blob = peers_to_store(cfg.get("peer_ids"))
