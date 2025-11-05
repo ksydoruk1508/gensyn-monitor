@@ -135,11 +135,20 @@
     }
 
     function getTotals(n) {
-      const totals = (n.gswarm && n.gswarm.stats && n.gswarm.stats.totals) || {};
-      return {
-        wins: Number.isFinite(+totals.wins) ? +totals.wins : -1,
-        rewards: Number.isFinite(+totals.rewards) ? +totals.rewards : -1,
-      };
+      const stats = (n.gswarm && n.gswarm.stats) || {};
+      const totals = stats.totals || {};
+      let wins = Number.isFinite(+totals.wins) ? +totals.wins : -1;
+      let rewards = Number.isFinite(+totals.rewards) ? +totals.rewards : -1;
+      if (!Number.isFinite(+totals.rewards)) {
+        const per = stats.per_peer || {};
+        let sum = 0;
+        for (const k of Object.keys(per)) {
+          const v = Number(per[k]?.rewards);
+          if (Number.isFinite(v)) sum += v;
+        }
+        if (Number.isFinite(sum)) rewards = sum;
+      }
+      return { wins, rewards };
     }
 
     function sortNodes(data) {
@@ -265,7 +274,16 @@
       const stats = gs.stats || {};
       const totals = stats.totals || {};
       const wins = Number.isFinite(+totals.wins) ? +totals.wins : 0;
-      const rewards = Number.isFinite(+totals.rewards) ? +totals.rewards : 0;
+      let rewards = Number.isFinite(+totals.rewards) ? +totals.rewards : NaN;
+      if (!Number.isFinite(rewards)) {
+        const per = stats.per_peer || {};
+        let sum = 0;
+        for (const k of Object.keys(per)) {
+          const v = Number(per[k]?.rewards);
+          if (Number.isFinite(v)) sum += v;
+        }
+        rewards = sum;
+      }
       const votes = Number.isFinite(+totals.votes) ? +totals.votes : (Number.isFinite(+totals.wins) ? +totals.wins : 0);
       const peers = (gs.peer_ids && gs.peer_ids.length) ? gs.peer_ids.length : (Number.isFinite(+totals.peers) ? +totals.peers : 0);
       const last = stats.last_check ? formatCheckTime(stats.last_check) : (gs.updated ? fmtTs(gs.updated) : '');
@@ -308,7 +326,7 @@
       const tgid = gs.tgid || stats.tgid;
       return `
         <div class="gswarm-card">
-          <div class="gswarm-head">Votes ${(Number.isFinite(+totals.votes) ? +totals.votes : (Number.isFinite(+totals.wins) ? +totals.wins : 0))} | Rewards ${(Number.isFinite(+totals.rewards) ? +totals.rewards : 0)} | Wins ${(Number.isFinite(+totals.wins) ? +totals.wins : 0)}</div>
+          <div class="gswarm-head">Votes ${(Number.isFinite(+totals.votes) ? +totals.votes : (Number.isFinite(+totals.wins) ? +totals.wins : 0))} | Rewards ${(() => { const tr = Number(totals.rewards); if (Number.isFinite(tr)) return tr; const per = stats.per_peer || {}; let s = 0; for (const k of Object.keys(per)) { const v = Number(per[k]?.rewards); if (Number.isFinite(v)) s += v; } return s; })()} | Wins ${(Number.isFinite(+totals.wins) ? +totals.wins : 0)}</div>
           <div class="peer-list">${peerCards || '<span class="muted">Peers не найдены</span>'}</div>
           ${missing}
           ${eoa ? `<div class="small">EOA: <code>${esc(eoa)}</code></div>` : ''}
