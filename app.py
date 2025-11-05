@@ -36,8 +36,15 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")                 # Bearer токен �
 PRUNE_DAYS  = _env_int("PRUNE_DAYS", 0)            # 0 = не чистить
 
 # G-Swarm фоновые обновления
-GSWARM_REFRESH_INTERVAL = _env_int("GSWARM_REFRESH_INTERVAL", 600)
+GSWARM_REFRESH_INTERVAL = _env_int("GSWARM_REFRESH_INTERVAL", 120)
 GSWARM_AUTO_SEND = os.getenv("GSWARM_AUTO_SEND", "0") == "1"
+# If enabled, persist G-Swarm stats node-by-node to show data earlier on the dashboard
+GSWARM_INCREMENTAL = os.getenv("GSWARM_INCREMENTAL", "1") == "1"
+# Pause between nodes (incremental mode) to avoid 429 from RPC providers
+try:
+    GSWARM_NODE_PAUSE_SEC = float(os.getenv("GSWARM_NODE_PAUSE_SEC", "80"))
+except Exception:
+    GSWARM_NODE_PAUSE_SEC = 2.0
 GSWARM_NODE_MAP_RAW = os.getenv("GSWARM_NODE_MAP", "").strip()
 
 def _dedup(seq: List[str]) -> List[str]:
@@ -661,13 +668,56 @@ async def refresh_gswarm_stats():
         logger.info("[GSWARM] sources: nodes=%d, peers_total=%d, eoa_nodes=%d", nodes_cnt, peers_sum, eoa_cnt)
     except Exception:
         pass
-    extra_peer_ids = sorted({pid for cfg in node_configs.values() for pid in cfg.get("peer_ids", [])})
-    peer_groups = _collect_peer_groups(node_configs) if node_configs else {}
-    any_alert = any(cfg.get("alert", True) for cfg in node_configs.values()) if node_configs else False
+
     if not node_configs and not eoas:
         logger.info("[GSWARM] refresh: nothing to do (no node configs / EOAs)")
         return
+
     loop = asyncio.get_running_loop()
+
+    if GSWARM_INCREMENTAL:
+        # Persist per node as soon as its snapshot is ready
+        total_updated = 0
+        total_peers = 0
+        items = list((node_configs or {}).items())
+        total_nodes = len(items)
+        for idx, (node_id, cfg) in enumerate(items, 1):
+            single_map = {node_id: cfg}
+            extra_peer_ids = sorted(cfg.get("peer_ids", []) or [])
+            peer_groups = _collect_peer_groups(single_map)
+            extra_eoas = [cfg.get("eoa")] if cfg.get("eoa") else []
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: run_once(
+                        send_telegram=GSWARM_AUTO_SEND and bool(cfg.get("alert", True)),
+                        extra_peer_ids=extra_peer_ids,
+                        extra_eoas=extra_eoas,
+                        offchain_peer_map=peer_groups,
+                    ),
+                )
+            except Exception as exc:
+                logger.exception("[GSWARM] refresh node %s failed: %s", node_id, exc)
+                continue
+
+            total_peers += len(result.get("per_peer", {}))
+            _, updated = await _persist_gswarm_result_overwrite(result, single_map)
+            total_updated += updated
+            # Gentle pause between nodes to reduce 429
+            if idx < total_nodes and GSWARM_NODE_PAUSE_SEC and GSWARM_NODE_PAUSE_SEC > 0:
+                await asyncio.sleep(GSWARM_NODE_PAUSE_SEC)
+        logger.info(
+            "[GSWARM] refresh ok (incremental): nodes=%d, peers_total=%d, updated=%d",
+            len(node_configs or {}),
+            total_peers,
+            total_updated,
+        )
+        return
+
+    # Batch mode (previous behavior): compute for all nodes then persist once
+    extra_peer_ids = sorted({pid for cfg in node_configs.values() for pid in cfg.get("peer_ids", [])})
+    peer_groups = _collect_peer_groups(node_configs) if node_configs else {}
+    any_alert = any(cfg.get("alert", True) for cfg in node_configs.values()) if node_configs else False
     try:
         result = await loop.run_in_executor(
             None,
